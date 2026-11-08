@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>NifeCode</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="ctxbar">
+        <div id="ctx-tabs"></div>
+        <button id="ctx-new" title="打开文件夹（本机）">＋</button>
+      </div>
+
+      <div id="activity">
+        <button data-act="explorer" class="active" title="资源管理器"></button>
+        <button data-act="search" title="搜索"></button>
+        <button data-act="scm" title="源代码管理"></button>
+        <button data-act="ssh" title="SSH 连接"></button>
+      </div>
+
+      <div id="sidebar">
+        <div class="head">
+          <span id="sidebar-title">资源管理器</span>
+          <button id="btn-open-folder" title="打开文件夹">＋</button>
+        </div>
+        <div id="tree"></div>
+
+        <div id="ssh-panel">
+          <div class="ssh-head">
+            <span>SSH 连接</span>
+            <span class="spacer"></span>
+            <button id="btn-ssh-new" title="新建连接">＋</button>
+          </div>
+          <div id="ssh-list"></div>
+        </div>
+
+        <div id="search-panel">
+          <div class="search-box">
+            <input id="search-input" placeholder="搜索内容，回车（当前工作区）" />
+          </div>
+          <div id="search-list"></div>
+        </div>
+
+        <div id="scm">
+          <div class="scm-head">
+            <span id="scm-branch">—</span>
+            <span class="spacer"></span>
+            <button id="scm-refresh" title="刷新">⟳</button>
+          </div>
+          <div id="scm-list"></div>
+          <div class="scm-commit">
+            <textarea id="scm-msg" placeholder="提交信息（Ctrl+Enter 提交）"></textarea>
+            <button id="scm-do">提交全部更改</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="main">
+        <div id="side-splitter"></div>
+        <div id="tabs"></div>
+        <div id="editor"></div>
+      </div>
+
+      <div id="term-col">
+        <div id="term-splitter"></div>
+        <div class="head">
+          <span>终端</span>
+          <span class="spacer"></span>
+          <button id="btn-new-term" title="当前页新建终端">＋</button>
+          <button id="btn-close-panel" title="收起终端栏">✕</button>
+        </div>
+        <div id="term-tabs"></div>
+        <div id="terms"></div>
+      </div>
+
+      <div id="status">
+        <span id="st-msg"></span>
+        <span class="spacer"></span>
+        <span id="st-conn">本地</span>
+        <span id="st-pos"></span>
+        <span id="st-fwd" title="点击停止全部端口转发"></span>
+        <span id="st-bridge" title="Agent Bridge 端口">bridge :7317</span>
+      </div>
+    </div>
+
+    <div id="modal" class="hidden">
+      <div class="box">
+        <div class="title"></div>
+        <div class="body"></div>
+        <div class="actions"></div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

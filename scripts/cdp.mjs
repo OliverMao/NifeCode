@@ -1,0 +1,55 @@
+// 通过 CDP 在 NifeCode 的 WebView2 里执行 JS，用于调试
+// 用法: node scripts/cdp.mjs "表达式"
+const PORT = process.env.CDP_PORT ?? 9222;
+
+let expr = process.argv.slice(2).join(" ");
+if (expr.startsWith("@")) {
+  expr = (await import("node:fs")).readFileSync(expr.slice(1), "utf8");
+}
+if (!expr) {
+  console.error('用法: node scripts/cdp.mjs "<js 表达式>"');
+  process.exit(1);
+}
+
+const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+const page = list.find((t) => t.type === "page");
+if (!page) {
+  console.error("没有找到页面目标");
+  process.exit(1);
+}
+
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+await new Promise((r, j) => {
+  ws.addEventListener("open", r, { once: true });
+  ws.addEventListener("error", j, { once: true });
+});
+
+let nextId = 1;
+function send(method, params) {
+  return new Promise((resolve) => {
+    const id = nextId++;
+    const onMsg = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.id === id) {
+        ws.removeEventListener("message", onMsg);
+        resolve(m);
+      }
+    };
+    ws.addEventListener("message", onMsg);
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+const r = await send("Runtime.evaluate", {
+  expression: expr,
+  awaitPromise: true,
+  returnByValue: true,
+  allowUnsafeEvalBlockedByCSP: true,
+});
+
+if (r.result?.exceptionDetails) {
+  console.error("异常:", JSON.stringify(r.result.exceptionDetails, null, 2));
+} else {
+  console.log(JSON.stringify(r.result?.result?.value ?? r.result, null, 2));
+}
+ws.close();
