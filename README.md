@@ -45,6 +45,36 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 
 前提：Rust（MSVC 工具链）+ Node 18+ + WebView2（Win11 自带）。
 
+## 打包 / 发布
+
+`pnpm tauri build` 之后能出两个 Windows 产物：
+
+| 产物 | 路径 | 说明 |
+|---|---|---|
+| 免安装单文件 | `src-tauri/target/release/nifecode.exe` | 双击就跑，不写注册表、不进开始菜单，放哪都行 |
+| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.0_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
+
+两个都**不需要额外文件**（前端已内嵌进 exe）。免安装版就是那个普通 release 二进制，改个名而已：
+
+```bash
+cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
+```
+
+### 签名
+
+仓库里带了个签名脚本（自签名证书，首次运行自动生成并装到当前用户证书库）：
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/sign.ps1 `
+  src-tauri/target/release/bundle/portable/NifeCode_0.1.0_x64_portable.exe `
+  src-tauri/target/release/bundle/nsis/NifeCode_0.1.0_x64-setup.exe
+```
+
+- 用的是 `CN=Oliver Mao, O=NifeCode`，SHA256 + DigiCert 时间戳，5 年有效
+- 证书和 pfx 在 `~/.nifecode-signing/`，**不进仓库**
+- **自签名 ≠ CA 签名**：自己机器上显示"已验证的发布者"（因为证书进了本机受信任根），别人的机器上仍然弹 SmartScreen"未知发布者"。想彻底消警告只能买 OV/EV 证书或用 Azure Trusted Signing
+- 想让别人信任：把 `~/.nifecode-signing/nifecode-selfsigned.cer` 发给对方，装到"受信任的根证书颁发机构"
+
 调试用（暴露 CDP，可截图/执行 JS）：
 
 ```bash
@@ -181,8 +211,6 @@ node scripts/cdp.mjs "document.title"                # 在页面里执行 JS
 - `Host rn` 这种别名、`ProxyCommand`、known_hosts 全部照旧，因为底层还是系统 `ssh`
 
 > Windows 上 OpenSSH 的 `ControlMaster` 试过，**不可用**（`mux_client_request_session: Connection reset by peer`，且只从 3.0s 降到 2.2s），已默认关闭。
-
-## Agent Bridge
 
 ## Agent Bridge
 
