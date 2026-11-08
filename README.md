@@ -302,6 +302,24 @@ src-tauri/src/
 scripts/           图标生成、CDP 截图与执行
 ```
 
+## TODO
+
+- [ ] **清理缓存功能**：加个命令（命令面板 / 状态栏菜单），一键清掉 WebView2 生成的可再生缓存，腾出磁盘。
+  实测 `%LOCALAPPDATA%\dev.nife.code\EBWebView` 会涨到 161 MB / 831 个文件，其中约 93 MB 是纯缓存：
+
+  | 目录 | 大小 | 处理 |
+  |---|---|---|
+  | `Default/Code Cache` | 61 MB | 删，Monaco 编译结果，下次自动重建 |
+  | `Default/Cache` | 30 MB | 删，HTTP 缓存 |
+  | `WidevineCdm` | 22 MB | 删，DRM 解码器，用不到 |
+  | `component_crx_cache` | 22 MB | 删，Chromium 组件包 |
+  | `Subresource Filter` | 13 MB | 删，广告过滤列表 |
+  | `GPUCache` `Dawn*Cache` | 2.7 MB | 删 |
+  | **`Local Storage`** | 几十 KB | **保留**——SSH 连接档案、打开的文件夹标签、窗口宽度都在这 |
+
+  要点：只能删缓存目录，不能整个删 profile（否则用户的 SSH 档案全丢）；删完不用重启，下次启动自动重建。
+- [ ] 退出时可选"清空缓存"开关（想做成真正绿色版的话）
+
 ## 已知限制 / 下一步
 
 - 没有 LSP（补全/跳转定义）；TS 语义校验已关闭，避免满屏假红
