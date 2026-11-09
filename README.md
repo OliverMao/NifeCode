@@ -76,6 +76,16 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
 ```
 
+## 应用图标
+
+深紫圆角底 + 近白的 `N`，**斜笔当刀刃、刀尖顺着斜线越出底线**，一共就这么两笔 —— 极简但能看出是刀。全部由 `scripts/make-icon.mjs` 用代码画（4×4 超采样抗锯齿，输出 16/24/32/48/64/128/256 七档打进一个 ICO），仓库里没有任何图片素材，也没有引图标库。
+
+```
+node scripts/make-icon.mjs   # 改完形状重跑一遍，再 pnpm tauri build 才会进 exe/安装包
+```
+
+> 踩过的坑：ICO 的 32 位像素是 **BGRA** 顺序，当初按 RGB 写，蓝色变橙棕色挂了很久。
+
 ## 快捷键
 
 | 键 | 作用 |
@@ -352,7 +362,7 @@ src-tauri/src/
   fwd.rs           端口转发（ssh -N -L）
   pty.rs           本地 PTY 终端
   bridge.rs        Agent Bridge HTTP 服务
-scripts/           图标生成、CDP 截图与执行
+scripts/           图标生成、CDP 截图与执行（make-icon.mjs 自绘"N + 小刀"图标，零素材）
 ```
 
 ## TODO
