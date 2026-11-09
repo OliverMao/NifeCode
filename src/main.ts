@@ -405,74 +405,61 @@ async function showSettings() {
   const rows: string[] = [];
   const row = (k: string, hint: string, v: string) =>
     `<div class="set-row"><div class="k"><b>${k}</b><span>${hint}</span></div><div class="v">${v}</div></div>`;
+  const sec = (t: string) => `<div class="set-sec">${t}</div>`;
+  const check = (id: string, on: boolean) => `<input id="${id}" type="checkbox" ${on ? "checked" : ""} />`;
 
+  rows.push(sec("外观"));
   rows.push(
     row(
-      "界面字号",
-      "编辑器、终端、文件树、状态栏一起缩放（也能用 Ctrl+= / Ctrl+-）",
+      "字体大小",
+      "同时缩放编辑器、终端与界面",
       `<input id="set-font" type="range" min="9" max="28" value="${fontSize}" /><span class="num" id="set-font-num">${fontSize}</span>`
     )
   );
+
+  rows.push(sec("编辑器"));
+  rows.push(row("代码缩略图", "显示在编辑器右侧", check("set-minimap", settings.minimap)));
+  rows.push(row("自动换行", "按窗口宽度折行", check("set-wrap", settings.wordWrap)));
   rows.push(
     row(
-      "编辑器 minimap",
-      "右侧的代码缩略图，关掉能省一点内存",
-      `<input id="set-minimap" type="checkbox" ${settings.minimap ? "checked" : ""} />`
-    )
-  );
-  rows.push(
-    row(
-      "自动换行",
-      "长行按窗口宽度折行，不用横向滚动",
-      `<input id="set-wrap" type="checkbox" ${settings.wordWrap ? "checked" : ""} />`
-    )
-  );
-  rows.push(
-    row(
-      "默认换行符",
-      "文件本来没有 CR 时用它（有 CRLF 的文件不会被改）",
+      "换行符",
+      "文件不含换行符时使用",
       `<select id="set-eol">
-         <option value="lf" ${settings.eol === "lf" ? "selected" : ""}>LF（Linux / 远端）</option>
-         <option value="crlf" ${settings.eol === "crlf" ? "selected" : ""}>CRLF（Windows）</option>
+         <option value="lf" ${settings.eol === "lf" ? "selected" : ""}>LF</option>
+         <option value="crlf" ${settings.eol === "crlf" ? "selected" : ""}>CRLF</option>
        </select>`
     )
   );
+
+  rows.push(sec("终端"));
   rows.push(
     row(
-      "默认终端",
-      "新建终端用哪个 shell（远端连接时忽略）",
+      "默认 Shell",
+      "新建终端时使用",
       `<select id="set-shell">
-         <option value="">跟随上次选择</option>
+         <option value="">最近一次使用</option>
          ${shells.map((sh) => `<option value="${sh.id}" ${settings.shell === sh.id ? "selected" : ""}>${sh.name}</option>`).join("")}
        </select>`
     )
   );
+
+  rows.push(sec("常规"));
+  rows.push(row("关闭前确认", "有未保存的更改时询问", check("set-confirm", settings.confirmClose)));
+  rows.push(row("会话恢复", "异常退出后恢复未保存内容", check("set-snapshot", settings.snapshot)));
+
+  rows.push(sec("存储"));
   rows.push(
     row(
-      "关窗时确认未保存",
-      "有没保存的文件时，关窗口先问你",
-      `<input id="set-confirm" type="checkbox" ${settings.confirmClose ? "checked" : ""} />`
-    )
-  );
-  rows.push(
-    row(
-      "WebView 缓存",
-      "只删能自动重建的缓存（Code Cache / HTTP Cache / GPUCache 等），登录状态和配置不动",
-      `<span id="set-cache-size" style="color:var(--fg-dim);font-size:calc(var(--ui) - 2px)">…</span>
+      "缓存",
+      "仅清理可自动重建的缓存，不影响设置与登录状态",
+      `<span id="set-cache-size" class="muted">读取中</span>
        <button id="set-cache-clear" class="mini">清理</button>`
-    )
-  );
-  rows.push(
-    row(
-      "崩溃后恢复未保存内容",
-      "定时把没保存的编辑快照起来，下次启动问你要不要恢复",
-      `<input id="set-snapshot" type="checkbox" ${settings.snapshot ? "checked" : ""} />`
     )
   );
 
   // ask() 一调用就把 DOM 画好了；这里先不 await，先把事件挂上再等关闭
   $("#modal").classList.add("wide");
-  const closed = ask("设置", `<div class="set">${rows.join("")}<div class="set-foot">改动立即生效，存在本机</div></div>`, [
+  const closed = ask("设置", `<div class="set">${rows.join("")}</div>`, [
     { label: "关闭", value: "ok", primary: true },
   ]);
 
@@ -514,30 +501,31 @@ async function showSettings() {
     save("snapshot", settings.snapshot ? "1" : "0");
   });
 
-  // 缓存：进设置时算一次大小，点清理后重算
+  // 缓存：进来算一次大小，清理后重算
   const sizeEl = on<HTMLSpanElement>("set-cache-size");
-  const fmt = (b: number) => (b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+  const fmt = (b: number) =>
+    b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`;
   const refreshCache = async () => {
     const info = await invoke<{ bytes: number }>("app_cache_size").catch(() => null);
-    if (sizeEl) sizeEl.textContent = info ? fmt(info.bytes) : "算不出来";
+    if (sizeEl) sizeEl.textContent = info ? fmt(info.bytes) : "—";
   };
   void refreshCache();
   on<HTMLButtonElement>("set-cache-clear")?.addEventListener("click", async (e) => {
     const btn = e.currentTarget as HTMLButtonElement;
     btn.disabled = true;
-    btn.textContent = "清理中…";
+    btn.textContent = "清理中";
     try {
       const freed = await invoke<number>("app_cache_clear");
-      setMsg(`已清理 ${fmt(freed)} 缓存`);
+      setMsg(`已清理缓存 ${fmt(freed)}`);
       await refreshCache();
       btn.textContent = "已清理";
     } catch (err) {
       setMsg(`清理失败：${err}`);
-      btn.textContent = "清理";
+      btn.textContent = "重试";
     }
     setTimeout(() => {
       btn.disabled = false;
-      if (btn.textContent === "已清理") btn.textContent = "清理";
+      if (!btn.textContent || btn.textContent !== "清理") btn.textContent = "清理";
     }, 1200);
   });
 

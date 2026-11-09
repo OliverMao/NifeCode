@@ -100,12 +100,20 @@ body {
 #activity button.active { color: #fff; border-left-color: var(--accent); filter: brightness(1.4); }
 
 /* 设置弹窗 */
-.set { min-width: 440px; max-height: 62vh; overflow-y: auto; padding-right: 4px; }
-.set-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid #232323; }
+.set { min-width: 440px; max-height: 72vh; overflow-y: auto; padding-right: 6px; }
+.set-row { display: flex; align-items: center; gap: 10px; padding: 6px 2px; }
 .set-row:last-child { border-bottom: 0; }
+.set-sec {
+  margin: 10px 0 2px; padding-bottom: 3px; color: #9a96a3;
+  font-size: calc(var(--ui) - 3px); letter-spacing: .08em;
+}
+.set-sec:first-child { margin-top: 2px; }
+.set-row + .set-sec { border-top: 1px solid #2f2f2f; padding-top: 9px; }
+.set-row .k b { font-size: calc(var(--ui) - 0.5px); }
+.set-row .muted { color: var(--fg-dim); font-size: calc(var(--ui) - 2px); font-variant-numeric: tabular-nums; }
 .set-row .k { flex: 1; }
 .set-row .k b { display: block; font-weight: 500; color: #e6e6e6; }
-.set-row .k span { display: block; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); margin-top: 2px; }
+.set-row .k span { display: block; color: var(--fg-dim); font-size: calc(var(--ui) - 2.5px); margin-top: 1px; }
 .set-row .v { display: flex; align-items: center; gap: 8px; flex: none; }
 .set-row input[type="checkbox"] {
   appearance: none; -webkit-appearance: none; width: 15px; height: 15px; cursor: pointer;
@@ -123,12 +131,13 @@ body {
 }
 .set-row input[type="range"] { width: 150px; accent-color: var(--accent); }
 .set-row .num { width: 34px; text-align: right; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); }
-.set-row button.mini {
-  background: #3a3d41; color: #eee; border: 1px solid #555; border-radius: 2px;
-  padding: 3px 10px; font: inherit; cursor: pointer;
+/* 次级按钮：设置里的"清理"不该跟"关闭"抢戏（#modal button 的 id 权重更高，这里要带上 #modal） */
+#modal .set-row button.mini {
+  background: #3a3d41; color: #e6e6e6; border: 1px solid #4a4d51; border-radius: 2px;
+  padding: 4px 12px; font: inherit; cursor: pointer;
 }
-.set-row button.mini:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
-.set-row button.mini:disabled { opacity: .6; cursor: default; }
+#modal .set-row button.mini:hover { background: #4a4d51; border-color: var(--accent); }
+#modal .set-row button.mini:disabled { opacity: .6; cursor: default; }
 .set-foot { margin-top: 14px; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); text-align: center; }
 
 #sidebar { background: var(--bg-side); display: flex; flex-direction: column; overflow: hidden; }
