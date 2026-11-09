@@ -234,6 +234,94 @@ const editor = new EditorHost(
 
 // ---------- 标签页 ----------
 
+// ---------- 远端文件夹选择器（SSH 用）----------
+async function pickRemoteFolder(start: string): Promise<string | null> {
+  const m = $("#modal");
+  m.querySelector(".title")!.textContent = "打开远端文件夹";
+  const body = m.querySelector(".body") as HTMLDivElement;
+  const acts = m.querySelector(".actions") as HTMLDivElement;
+  body.style.whiteSpace = "normal";
+  body.innerHTML = `
+    <div class="pk-path">
+      <input id="pk-input" spellcheck="false" placeholder="/home/user/project" />
+    </div>
+    <div id="pk-list" class="pk-list"></div>`;
+  acts.innerHTML = "";
+  m.classList.remove("hidden");
+
+  const input = body.querySelector("#pk-input") as HTMLInputElement;
+  const list = body.querySelector("#pk-list") as HTMLDivElement;
+  let cur = start;
+
+  const addRow = (label: string, onPick: () => void, isDir: boolean) => {
+    const row = document.createElement("div");
+    row.className = "pk-row";
+    const ico = document.createElement("span");
+    ico.className = "ico";
+    if (isDir) ico.innerHTML = iconSvg(iconFor(label, true, false));
+    else ico.textContent = "↰";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = label;
+    row.append(ico, name);
+    row.onclick = onPick;
+    list.appendChild(row);
+  };
+
+  const go = async (path: string) => {
+    cur = path;
+    input.value = path;
+    list.innerHTML = `<div class="pk-empty">读取中…</div>`;
+    let entries: Entry[];
+    try {
+      entries = await invoke<Entry[]>("read_dir", { ...connArg(), path });
+    } catch (e) {
+      list.innerHTML = `<div class="pk-empty">打不开：${String(e).slice(0, 120)}</div>`;
+      return;
+    }
+    list.innerHTML = "";
+    const parent = parentDir(path);
+    if (parent && parent !== path) addRow("..", () => void go(parent), false);
+    const dirs = entries.filter((e) => e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
+    if (dirs.length === 0) list.innerHTML = `<div class="pk-empty">（没有子文件夹）</div>`;
+    for (const d of dirs) addRow(d.name, () => void go(d.path), true);
+  };
+
+  return new Promise<string | null>((resolve) => {
+    const done = (v: string | null) => {
+      m.classList.add("hidden");
+      body.style.whiteSpace = "";
+      m.onclick = null;
+      resolve(v);
+    };
+    const ok = document.createElement("button");
+    ok.textContent = "打开";
+    const cancel = document.createElement("button");
+    cancel.textContent = "取消";
+    cancel.className = "secondary";
+    ok.onclick = () => done(cur);
+    cancel.onclick = () => done(null);
+    acts.append(cancel, ok);
+
+    input.onkeydown = (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        const v = input.value.trim();
+        if (v) void go(v);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        done(null);
+      }
+    };
+    // 点遮罩关掉
+    m.onclick = (ev) => { if (ev.target === m) done(null); };
+
+    void go(start);
+    input.focus();
+    input.select();
+  });
+}
+
 // ---------- 悬停提示：内容被截断时才显示完整路径 ----------
 let tipTimer = 0;
 
@@ -407,6 +495,17 @@ function parentOf(path: string): string {
   return path.slice(0, i);
 }
 
+/** 上一级目录：/home → /，D:/a → D:/，到顶返回 null */
+function parentDir(path: string): string | null {
+  const clean = path.replace(/[\/]+$/, "");
+  const i = Math.max(clean.lastIndexOf("/"), clean.lastIndexOf("\\"));
+  if (i < 0) return null;
+  if (i === 0) return "/";
+  if (i === 2 && /^[A-Za-z]:$/.test(clean.slice(0, 2))) return `${clean.slice(0, 2)}/`;
+  const up = clean.slice(0, i);
+  return up === clean ? null : up;
+}
+
 function joinPath(dir: string, name: string): string {
   return `${dir.replace(/[\/]+$/, "")}/${name}`;
 }
@@ -430,6 +529,7 @@ function treeMenu(e: Entry): MenuItem[] {
   if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(dir) });
   items.push("sep");
   if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
+  else items.push({ label: "在此打开工作区", run: () => void openRoot(e.path) });
   items.push(
     { label: "重命名", run: () => void renameEntry(e.path) },
     { label: "删除", run: () => void deleteEntry(e.path) },
@@ -1217,6 +1317,15 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLButtonElement>("#btn-open-folder").onclick = async () => {
+    if (host) {
+      // SSH：弹一个远端目录浏览器，选完直接切工作区
+      const dir = await pickRemoteFolder(root ?? "/");
+      if (dir) {
+        await openRoot(dir);
+        setMsg(`工作区：${dir}`);
+      }
+      return;
+    }
     const dir = await pickFolder();
     if (dir) {
       await openRoot(dir);

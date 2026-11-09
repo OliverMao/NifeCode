@@ -98,6 +98,15 @@ cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
 超时也都设了：`ConnectTimeout=8`、`ServerAliveInterval=5`×3、前端 20 秒兜底。
 - 私钥路径填了就用 `-i`，留空走 ssh-agent / 默认密钥
 
+### 连上之后换目录
+
+SSH 上下文的资源管理器 `＋` 会弹一个**远端目录浏览器**（不是本地文件对话框）：
+
+- 顶部是路径输入框，直接敲 `/workspace/xxx` 回车就跳过去
+- 下面是子文件夹列表，点进去、`↰..` 回上一级
+- 「打开」把当前目录设为工作区（也可以右键树里的某个文件夹 →「在此打开工作区」）
+- 连上时默认还是用户的 `$HOME`
+
 ### 密码怎么存的
 
 - 密码写进 **Windows 凭据管理器**（`keyring` crate，底层 DPAPI，只有你这个 Windows 用户能解），**不进 localStorage**
