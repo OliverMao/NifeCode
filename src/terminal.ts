@@ -162,8 +162,8 @@ export class TerminalHost {
     return list.find((x) => x.id === id)?.name ?? id;
   }
 
-  /** 在当前页新建一个终端（堆叠在下方）；shellId 不传就用当前偏好 */
-  async newTerminal(shellId?: string) {
+  /** 在当前页新建一个终端（堆叠在下方）；shellId 不传就用当前偏好，cwd 不传就用工作区根 */
+  async newTerminal(shellId?: string, cwd?: string) {
     await this.init();
     let page = this.pages[this.activePage];
     if (!page) page = this.newPage(false);
@@ -205,10 +205,10 @@ export class TerminalHost {
     // 连着 SSH 时新终端直接 ssh 过去（这样密码认证也能用）
     const remote = this.ssh();
     const id = await invoke<number>("pty_open", {
-      cwd: remote ? null : (this.cwd() ?? null),
+      cwd: remote ? null : (cwd ?? this.cwd() ?? null),
       cols: term.cols || 80,
       rows: term.rows || 24,
-      ssh: remote ? { target: remote.target, port: remote.port, cwd: this.cwd() ?? null } : null,
+      ssh: remote ? { target: remote.target, port: remote.port, cwd: cwd ?? this.cwd() ?? null } : null,
       shell: remote ? null : wantShell,
     });
 

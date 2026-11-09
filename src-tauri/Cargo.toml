@@ -21,6 +21,7 @@ rfd = "0.15"
 # 进程内读 git 状态：实测 0.8ms vs 每次 spawn git 37.8ms
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
+tauri-plugin-clipboard-manager = "2.5.0"
 
 [profile.dev]
 incremental = true

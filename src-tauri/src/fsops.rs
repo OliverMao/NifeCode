@@ -383,6 +383,34 @@ pub fn pick_folder() -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// 在 Windows 资源管理器里定位/打开（远端没有这个能力，前端会隐藏菜单项）
+#[tauri::command]
+pub fn fs_reveal(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if p.is_dir() {
+            cmd.arg(&path);
+        } else {
+            // /select, 和路径必须连在一起，参数里的空格交给系统解析
+            cmd.raw_arg(format!("/select,\"{path}\""));
+        }
+        crate::proc::hide_console(&mut cmd);
+        // explorer.exe 总是返回非 0，能启动就算成功
+        cmd.spawn().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("只有 Windows 支持".into())
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_home(target: String, port: u16) -> Result<String, String> {
     let raw = ssh_exec(&target, port, "echo $HOME")?;

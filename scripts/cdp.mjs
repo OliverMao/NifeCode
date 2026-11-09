@@ -12,7 +12,8 @@ if (!expr) {
 }
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = list.find((t) => t.type === "page");
+// 只认应用页面：WebView2 有时会冒出权限提示框之类的 page 目标
+const page = list.find((t) => t.type === "page" && t.url.startsWith("http")) ?? list.find((t) => t.type === "page");
 if (!page) {
   console.error("没有找到页面目标");
   process.exit(1);

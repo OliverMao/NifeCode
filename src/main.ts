@@ -1,6 +1,7 @@
 import "./style.css";
 import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
 import { TerminalHost } from "./terminal";
@@ -531,13 +532,41 @@ function treeMenu(e: Entry): MenuItem[] {
   if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
   else items.push({ label: "在此打开工作区", run: () => void openRoot(e.path) });
   items.push(
+    { label: "复制绝对路径", run: () => copyText(e.path) },
+    { label: "复制相对路径", run: () => copyText(relPath(e.path)) },
+    "sep",
+    { label: "复制", run: () => setClip(e.path, false) },
+    { label: "剪切", run: () => setClip(e.path, true) },
     { label: "重命名", run: () => void renameEntry(e.path) },
     { label: "删除", run: () => void deleteEntry(e.path) },
     "sep",
-    { label: "复制", run: () => setClip(e.path, false) },
-    { label: "剪切", run: () => setClip(e.path, true) }
+    { label: "在终端中打开", run: () => { showTerm(true); void terms.newTerminal(undefined, dir); } }
   );
+  // 浏览器/资源管理器定位只有本机有
+  if (!host) {
+    items.push({ label: "在资源管理器中显示", run: () => { void invoke("fs_reveal", { path: e.path }).catch((err) => setMsg(`打不开：${err}`)); } });
+  }
   return items;
+}
+
+/** 复制纯文本到系统剪贴板。走 Tauri 的插件：navigator.clipboard 会弹权限框，execCommand 在 WebView2 里被禁 */
+async function copyText(text: string) {
+  try {
+    await writeText(text);
+    setMsg(`已复制：${text}`);
+  } catch (e) {
+    setMsg(`复制失败：${e}`);
+  }
+}
+
+/** 相对工作区根目录的路径 */
+function relPath(p: string): string {
+  if (!root) return p;
+  const norm = (s: string) => s.replace(/[\\/]+/g, "/").replace(/\/$/, "");
+  const r = norm(root);
+  const q = norm(p);
+  if (q === r) return ".";
+  return q.startsWith(`${r}/`) ? q.slice(r.length + 1) : q;
 }
 
 function setClip(path: string, cut: boolean) {
@@ -1291,6 +1320,7 @@ async function boot() {
       { label: "新建文件夹", run: () => void newEntry(root!, true) },
     ];
     if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(root!) });
+    items.push("sep", { label: "复制工作区路径", run: () => void copyText(root!) });
     showMenu(ev.clientX, ev.clientY, items);
   });
 
@@ -1345,21 +1375,6 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       saveCtxs();
     }
   };
-
-  $("#tree").addEventListener("scroll", hideTip, true);
-
-  $("#tree").addEventListener("contextmenu", (ev) => {
-    const t = ev.target as HTMLElement;
-    if (t.closest(".node")) return; // 行上自己有菜单
-    if (!root) return;
-    ev.preventDefault();
-    const items: MenuItem[] = [
-      { label: "新建文件", run: () => void newEntry(root!, false) },
-      { label: "新建文件夹", run: () => void newEntry(root!, true) },
-    ];
-    if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(root!) });
-    showMenu(ev.clientX, ev.clientY, items);
-  });
 
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
     b.onclick = () => {

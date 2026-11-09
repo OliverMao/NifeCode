@@ -11,6 +11,7 @@ pub fn run() {
         .manage(pty::PtyState::default())
         .manage(bridge::BridgeState::default())
         .manage(fwd::FwdState::default())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             bridge::spawn(app.handle().clone());
             // 预热：本会话第一次跑外部命令会被系统扫描，垫一次省得用户等
@@ -40,6 +41,7 @@ pub fn run() {
             fsops::fs_rename,
             fsops::fs_delete,
             fsops::fs_copy,
+            fsops::fs_reveal,
             fsops::ssh_save_password,
             fsops::ssh_forget_password,
             fsops::ssh_has_password,
