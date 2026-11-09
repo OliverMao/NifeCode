@@ -1928,6 +1928,38 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
+  // 自定义标题栏的三个按钮（SVG 自绘，跟其它图标同一套笔画）
+  const WIN_ICON = {
+    min: '<svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg>',
+    max: '<svg viewBox="0 0 12 12"><rect x="2.4" y="2.4" width="7.2" height="7.2" rx="0.8"/></svg>',
+    restore: '<svg viewBox="0 0 12 12"><rect x="2" y="4" width="6" height="6" rx="0.8"/><path d="M4 4V2.8h5.2V8H8"/></svg>',
+    close: '<svg viewBox="0 0 12 12"><path d="M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8"/></svg>',
+  };
+  const win = getCurrentWindow();
+  const btnMin = $<HTMLButtonElement>("#win-min");
+  const btnMax = $<HTMLButtonElement>("#win-max");
+  const btnClose = $<HTMLButtonElement>("#win-close");
+  btnMin.innerHTML = WIN_ICON.min;
+  btnMax.innerHTML = WIN_ICON.max;
+  btnClose.innerHTML = WIN_ICON.close;
+  btnMin.onclick = () => void win.minimize();
+  btnMax.onclick = () => void win.toggleMaximize();
+  btnClose.onclick = () => void win.close();
+  // 双击标题栏空白处也最大化/还原（Windows 的老习惯）
+  $<HTMLDivElement>("#titlebar").addEventListener("dblclick", (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest("#brand") || t.closest("#winbtns")) return;
+    void win.toggleMaximize();
+  });
+  // 最大化时把图标换成"还原"，并去掉圆角留白
+  const syncMaxIcon = async () => {
+    const maxed = await win.isMaximized().catch(() => false);
+    btnMax.innerHTML = maxed ? WIN_ICON.restore : WIN_ICON.max;
+    document.body.classList.toggle("maximized", maxed);
+  };
+  void syncMaxIcon();
+  await win.onResized(() => void syncMaxIcon());
+
   $<HTMLButtonElement>("#brand").onclick = (ev) => {
     ev.stopPropagation();
     const r = $<HTMLButtonElement>("#brand").getBoundingClientRect();

@@ -37,15 +37,31 @@ body {
 #app {
   display: grid;
   grid-template-columns: 48px var(--side-w, 260px) 1fr var(--term-w, 420px);
-  grid-template-rows: 31px 1fr 22px;
+  grid-template-rows: 34px 31px 1fr 22px;
   height: 100vh;
 }
 /* ---------- 顶部上下文标签（本机 / SSH） ---------- */
 #ctxbar {
-  grid-column: 1 / 5; grid-row: 1;
+  grid-column: 1 / 5; grid-row: 2;
   display: flex; align-items: stretch; background: #252526;
   border-bottom: 1px solid var(--border);
 }
+/* 自定义标题栏（原生那圈去掉了）：左边品牌名点开主菜单，右边三个窗口按钮 */
+#titlebar {
+  grid-column: 1 / 5; grid-row: 1;
+  display: flex; align-items: stretch; background: #1b1520;
+  border-bottom: 1px solid var(--border); user-select: none;
+}
+#titlebar .drag { flex: 1; min-width: 20px; }
+#winbtns { display: flex; flex: 0 0 auto; }
+#winbtns button {
+  width: 46px; border: 0; background: transparent; color: #cfcfcf; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+#winbtns button:hover { background: rgba(255, 255, 255, .09); color: #fff; }
+#win-close:hover { background: #c42b1c; color: #fff; }
+#winbtns button svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.15; }
+
 /* 左上角：logo + 品牌名，点它开主菜单 */
 #brand {
   flex: 0 0 auto; display: flex; align-items: center; gap: 6px; height: 100%;
@@ -73,7 +89,7 @@ body {
 }
 #ctx-new:hover { color: #fff; background: #2a2d2e; }
 
-#activity { grid-row: 2 / 3; background: #333333; display: flex; flex-direction: column; }
+#activity { grid-row: 3 / 4; background: #333333; display: flex; flex-direction: column; }
 #activity button {
   width: 48px; height: 48px; border: 0; background: transparent; color: #858585;
   cursor: pointer; border-left: 2px solid transparent;
@@ -339,7 +355,7 @@ body {
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
 
 #status {
-  grid-row: 3; grid-column: 1 / 5; background: var(--status); color: #fff; display: flex; align-items: center;
+  grid-row: 4; grid-column: 1 / 5; background: var(--status); color: #fff; display: flex; align-items: center;
   gap: 14px; padding: 0 10px; font-size: calc(var(--ui) - 1px);
 }
 #status .spacer { flex: 1; }

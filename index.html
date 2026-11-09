@@ -6,7 +6,7 @@
   </head>
   <body>
     <div id="app">
-      <div id="ctxbar">
+      <div id="titlebar" data-tauri-drag-region>
         <button id="brand" title="主菜单">
           <svg viewBox="0 0 32 32" width="16" height="16" aria-hidden="true">
             <rect x="5" y="5" width="22" height="22" fill="#452760" rx="2"/>
@@ -14,6 +14,15 @@
           </svg>
           <span class="nm">NifeCode</span>
         </button>
+        <div class="drag" data-tauri-drag-region></div>
+        <div id="winbtns">
+          <button id="win-min" title="最小化"></button>
+          <button id="win-max" title="最大化"></button>
+          <button id="win-close" title="关闭"></button>
+        </div>
+      </div>
+
+      <div id="ctxbar">
         <div id="ctx-tabs"></div>
         <button id="ctx-new" title="打开文件夹（本机）">＋</button>
       </div>
