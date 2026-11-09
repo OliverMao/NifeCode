@@ -795,6 +795,9 @@ async function closeMany(paths: string[]) {
 /** 左上角主菜单（点 logo / 品牌名出来） */
 function mainMenu(): MenuItem[] {
   return [
+    // 终端栏收起以后入口不好找，主菜单里单列一条（文案跟着当前状态走）
+    { label: $("#term-col").classList.contains("collapsed") ? "显示终端" : "隐藏终端", run: () => toggleTerm() },
+    "sep",
     { label: "设置…", run: () => void showSettings() },
     { label: "关于 NifeCode", run: () => void showAbout() },
     "sep",
@@ -1881,23 +1884,22 @@ async function boot() {
   setConnLabel();
   renderTabs();
 
+  // 面板头三件事：＋ 新建终端页、˅ 在当前页新建终端（选类型）、✕ 收起；拆分在每个终端自己的头上
   $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newPage(true); };
-  $<HTMLButtonElement>("#btn-split-term").onclick = () => { showTerm(true); void terms.newTerminal(); };
   // 界面小按钮统一用自绘 SVG（＋ ✕ ˅），别用字体里那些大小不一的符号
   for (const [id, name] of [
     ["#ctx-new", "plus"],
     ["#btn-open-folder", "plus"],
     ["#btn-ssh-new", "plus"],
-    ["#btn-shell", "chevron"],
     ["#btn-new-term", "plus"],
-    ["#btn-split-term", "split"],
+    ["#btn-term-type", "chevron"],
     ["#btn-close-panel", "close"],
   ]) {
     const el = $(id);
     if (el) el.innerHTML = chromeIcon(name);
   }
 
-  $<HTMLButtonElement>("#btn-shell").onclick = async (ev) => {
+  $<HTMLButtonElement>("#btn-term-type").onclick = async (ev) => {
     const btn = ev.currentTarget as HTMLButtonElement;
     const r = btn.getBoundingClientRect();
     if (shellList.length === 0) await loadShells();
@@ -1907,7 +1909,7 @@ async function boot() {
         preferredShell = sh.id;
         localStorage.setItem(SHELL_KEY, sh.id);
         showTerm(true);
-        void terms.newPage(true, sh.id);
+        void terms.newTerminal(sh.id); // 选类型也只是在当前页新建，不另开一页
         setMsg(`新终端：${sh.name}`);
       },
     }));

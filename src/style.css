@@ -291,6 +291,9 @@ body {
   background: var(--bg); border-left: 1px solid var(--border); overflow: hidden;
 }
 #term-col.collapsed { display: none; }
+/* ＋ 和它右边的类型小三角算一组，别被按钮间距撑开 */
+#btn-term-type { margin-left: -6px; padding-left: 2px; padding-right: 2px; }
+#btn-term-type svg { width: 10px; height: 10px; }
 #app.no-term { grid-template-columns: 48px 260px 1fr; }
 
 #term-splitter, #side-splitter {
@@ -314,6 +317,11 @@ body {
 .ttab .x { opacity: .6; font-size: 11px; display: inline-flex; align-items: center; }
 .ttab .x svg { display: block; width: 11px; height: 11px; }
 .ttab .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
+/* 双击页签改名时的就地输入框 */
+.ttab .tno-edit {
+  background: #1e1e1e; color: #fff; border: 1px solid var(--accent); border-radius: 2px;
+  font: inherit; padding: 0 3px; min-width: 90px; outline: none; box-sizing: border-box;
+}
 
 .terms { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; position: relative; }
 
@@ -346,6 +354,9 @@ body {
 .pane-head .spacer { flex: 1; }
 .pane-head .x { cursor: pointer; opacity: .7; padding: 0 4px; display: inline-flex; align-items: center; }
 .pane-head .x svg { display: block; width: 11px; height: 11px; }
+.pane-head .split { cursor: pointer; opacity: .7; padding: 0 4px; display: inline-flex; align-items: center; }
+.pane-head .split svg { display: block; width: 11px; height: 11px; }
+.pane-head .split:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
 .pane-head .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
 /* overflow: clip（不是 hidden）——hidden 还是可滚动的容器，中文输入法的组合文字一长就会把
    终端整块滚偏 55px，看着就是闪一下。clip 根本不能滚，从根上没了这个问题。 */

@@ -28,6 +28,7 @@ interface Pane {
   tag: string;
   splitter?: HTMLElement; // 这个终端上方的横向分隔条
   pageId: number;
+  shell: string | null; // 这个终端用的 shell id（拆分时照抄它）
   cols: number;   // 上一次下发给 PTY 的尺寸，用来去重
   rows: number;
   rt?: number;    // resize 去抖定时器
@@ -41,6 +42,7 @@ interface Page {
   el: HTMLElement;   // .term-page
   tab: HTMLElement;  // 页标签
   panes: Pane[];
+  name?: string; // 双击页签改的自定义名字；没设过就用里面的终端类型
 }
 
 export class TerminalHost {
@@ -50,6 +52,7 @@ export class TerminalHost {
   private seqPage = 0;
   private empty: HTMLElement;
   private fontPx = 13; // 新开的终端也要用当前字号
+  private renaming = false; // 正在改页签名字：这时候别把焦点抢回终端
 
   constructor(
     private body: HTMLElement,   // .terms
@@ -109,6 +112,10 @@ export class TerminalHost {
     this.pages.push(page);
 
     tab.onclick = () => this.activatePage(page.id);
+    tab.ondblclick = (e) => {
+      e.stopPropagation();
+      this.renamePage(page);
+    };
     tab.querySelector(".x")!.addEventListener("click", (e) => {
       e.stopPropagation();
       this.closePage(page.id);
@@ -185,10 +192,14 @@ export class TerminalHost {
     const shellName = (await this.shellNameOf(wantShell)) ?? "本地";
     const tag = this.ssh() ? `SSH ${this.ssh()!.target}` : shellName;
     head.innerHTML = `<span>终端 ${no} · ${tag}</span><span class="spacer"></span>`;
+    const split = document.createElement("span");
+    split.className = "split";
+    split.title = "拆分：在当前页再开一个，类型照抄这个终端";
+    split.innerHTML = chromeIcon("split");
     const close = document.createElement("span");
     close.className = "x";
     close.innerHTML = chromeIcon("close");
-    head.appendChild(close);
+    head.append(split, close);
     const termBody = document.createElement("div");
     termBody.className = "term-body";
     el.append(head, termBody);
@@ -223,10 +234,20 @@ export class TerminalHost {
       shell: remote ? null : wantShell,
     });
 
-    const pane: Pane = { id, no, term, fit, el, headEl: head, tag, pageId: page.id, cols: 0, rows: 0 };
+    const pane: Pane = { id, no, term, fit, el, headEl: head, tag, pageId: page.id, shell: wantShell, cols: 0, rows: 0 };
     page.panes.push(pane);
 
     head.onclick = () => this.focus(id);
+    // 终端自己那条标题就在页签下面，很多人会双击它 —— 一样当成改这一页的名字
+    head.ondblclick = (ev) => {
+      ev.stopPropagation();
+      this.renamePage(page);
+    };
+    split.onclick = (ev) => {
+      ev.stopPropagation();
+      this.focus(id);
+      void this.newTerminal(wantShell ?? undefined); // 照抄这个终端的类型
+    };
     close.onclick = (ev) => {
       ev.stopPropagation();
       this.closePane(id);
@@ -235,7 +256,6 @@ export class TerminalHost {
     term.onData((d) => { void invoke("pty_write", { id, data: d }); });
     term.onResize(() => this.syncSize(pane));
 
-    this.syncHeads(page);
     this.refresh(page);
     this.focus(id);
     return id;
@@ -326,6 +346,9 @@ export class TerminalHost {
     if (page && page.id !== this.pages[this.activePage]?.id) this.activatePage(page.id);
     for (const x of all) x.el.classList.toggle("active", x.id === p.id);
     requestAnimationFrame(() => {
+      // 单击页签会走到这里；如果这一下其实是双击改名，焦点不能被终端抢走，
+      // 否则输入框刚出来就失焦、立刻关掉，看着就像"双击没反应"
+      if (this.renaming) return;
       this.fitPane(p);
       p.term.focus();
     });
@@ -338,7 +361,6 @@ export class TerminalHost {
     if (!page) return;
     this.killPane(p);
     page.panes = page.panes.filter((x) => x.id !== id);
-    this.syncHeads(page);
     this.refresh(page);
     if (page.panes.length === 0) {
       // 页里最后一个终端关掉，就把这页也关了
@@ -358,15 +380,46 @@ export class TerminalHost {
       if (name(p.panes[0]) === base) dup += 1;
     }
     const label = page.tab.querySelector(".tno");
-    if (label) label.textContent = dup ? `${base} (${dup + 1})` : base;
+    const auto = dup ? `${base} (${dup + 1})` : base;
+    if (label) label.textContent = page.name ?? auto;
     // 一页里叠了好几个终端时，悬浮能看到都有谁
-    page.tab.title = page.panes.map((p) => p.tag).join("\n");
+    const inner = page.panes.map((p) => p.tag).join("\n");
+    page.tab.title = `${page.name ? `${page.name}\n` : ""}${inner}\n双击页签可改名`;
   }
 
-  /** 一页里只有一个终端时不用显示它的小标题栏，两个以上才需要 */
-  private syncHeads(page: Page) {
-    const show = page.panes.length > 1;
-    for (const p of page.panes) p.headEl.style.display = show ? "" : "none";
+  /** 双击页签就地改名；清空回车 = 退回自动名字 */
+  private renamePage(page: Page) {
+    if (page.tab.querySelector("input")) return;
+    const label = page.tab.querySelector<HTMLElement>(".tno");
+    if (!label) return;
+    this.renaming = true;
+    const input = document.createElement("input");
+    input.className = "tno-edit";
+    input.spellcheck = false;
+    input.value = page.name ?? label.textContent ?? "";
+    input.style.width = `${Math.max(90, label.offsetWidth + 12)}px`; // 按当前名字宽度撑开，别一进去就左右滚
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (save: boolean) => {
+      if (done) return;
+      done = true;
+      this.renaming = false;
+      if (save) page.name = input.value.trim() || undefined;
+      const span = document.createElement("span");
+      span.className = "tno";
+      input.replaceWith(span);
+      this.namePage(page);
+    };
+    input.onclick = (ev) => ev.stopPropagation();
+    input.ondblclick = (ev) => ev.stopPropagation();
+    input.onkeydown = (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") finish(true);
+      else if (ev.key === "Escape") finish(false);
+    };
+    input.onblur = () => finish(true);
   }
 
   private killPane(p: Pane) {
