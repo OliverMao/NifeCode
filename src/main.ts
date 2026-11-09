@@ -502,7 +502,8 @@ function baseName(p: string) {
 /** 关标签（✕ 和 Ctrl+W 共用），有未保存改动会先问 */
 async function closeTab(p: string) {
   const d = editor.docsFor(p);
-  if (d && editor.isDirty(d)) {
+  if (!d) return;
+  if (editor.isDirty(d)) {
     const r = await ask("未保存的更改", `“${baseName(p)}” 有未保存的更改，要保存吗？`, [
       { label: "保存", value: "save", primary: true },
       { label: "不保存", value: "discard" },
@@ -511,8 +512,54 @@ async function closeTab(p: string) {
     if (r === "cancel") return;
     if (r === "save") await savePath(p);
   }
+  const wasActive = editor.current()?.path === p;
+  const i = editor.paths().indexOf(p);
   editor.close(p);
+  // 关的是当前标签就顺手切到邻居（VS Code 也是这样），不然编辑器会空着
+  if (wasActive) {
+    const left = editor.paths();
+    const next = left[Math.min(i, left.length - 1)];
+    if (next) editor.show(next);
+  }
   renderTabs();
+}
+
+/** 一次关多个；中途有未保存的会让你选，选了取消就停下 */
+async function closeMany(paths: string[]) {
+  for (const p of paths) {
+    if (!editor.docsFor(p)) continue;
+    await closeTab(p);
+    if (editor.docsFor(p)) return; // 还开着 = 用户点了取消
+  }
+}
+
+/** 标签右键菜单 */
+function tabMenu(p: string): MenuItem[] {
+  const paths = editor.paths();
+  const i = paths.indexOf(p);
+  const others = paths.filter((x) => x !== p);
+  const right = paths.slice(i + 1);
+  const clean = paths.filter((x) => {
+    const d = editor.docsFor(x);
+    return d && !editor.isDirty(d);
+  });
+  const items: MenuItem[] = [{ label: "关闭", run: () => void closeTab(p) }];
+  if (others.length) items.push({ label: "关闭其他", run: () => void closeMany(others) });
+  if (right.length) items.push({ label: "关闭右侧", run: () => void closeMany(right) });
+  if (clean.length) items.push({ label: "关闭已保存", run: () => void closeMany(clean) });
+  if (paths.length > 1) items.push({ label: "全部关闭", run: () => void closeMany(paths) });
+  items.push(
+    "sep",
+    { label: "复制路径", run: () => copyText(p) },
+    { label: "复制相对路径", run: () => copyText(relPath(p)) }
+  );
+  if (!host) {
+    items.push("sep", {
+      label: "在资源管理器中显示",
+      run: () => { void invoke("fs_reveal", { path: p }).catch((err) => setMsg(`打不开：${err}`)); },
+    });
+  }
+  return items;
 }
 
 function markTabDirty(path: string, dirty: boolean) {
@@ -545,6 +592,17 @@ function renderTabs(activePath?: string) {
     };
     el.append(name, x);
     el.onclick = () => { editor.show(p); renderTabs(p); };
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showMenu(ev.clientX, ev.clientY, tabMenu(p));
+    };
+    // 鼠标中键点标签 = 关闭（VS Code 的习惯）
+    el.onauxclick = (ev) => {
+      if (ev.button === 1) {
+        ev.preventDefault();
+        void closeTab(p);
+      }
+    };
     box.appendChild(el);
   }
   renderStatusInfo();
