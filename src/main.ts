@@ -233,6 +233,41 @@ const editor = new EditorHost(
 );
 
 // ---------- 标签页 ----------
+
+// ---------- 悬停提示：内容被截断时才显示完整路径 ----------
+let tipTimer = 0;
+
+function placeTip(text: string, ev: MouseEvent) {
+  const tip = $("#tip");
+  tip.textContent = text;
+  tip.classList.remove("hidden");
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14;
+  let y = ev.clientY + 18;
+  if (x + r.width > window.innerWidth - 8) x = Math.max(8, window.innerWidth - r.width - 8);
+  if (y + r.height > window.innerHeight - 8) y = Math.max(8, ev.clientY - r.height - 12);
+  tip.style.left = `${x}px`;
+  tip.style.top = `${y}px`;
+}
+
+function hideTip() {
+  if (tipTimer) clearTimeout(tipTimer);
+  tipTimer = 0;
+  $("#tip").classList.add("hidden");
+}
+
+/** 给一个"可能被截断"的元素挂上提示；text 是要显示的完整内容 */
+function bindTip(el: HTMLElement, measure: HTMLElement, text: () => string) {
+  el.addEventListener("mouseenter", (ev) => {
+    if (measure.scrollWidth <= measure.clientWidth + 1) return; // 没截断就不打扰
+    const e2 = ev as MouseEvent;
+    if (tipTimer) clearTimeout(tipTimer);
+    tipTimer = window.setTimeout(() => placeTip(text(), e2), 350);
+  });
+  el.addEventListener("mouseleave", hideTip);
+  el.addEventListener("mousedown", hideTip);
+}
+
 function baseName(p: string) {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
@@ -256,6 +291,7 @@ function renderTabs(activePath?: string) {
     name.textContent = baseName(p);
     name.style.overflow = "hidden";
     name.style.textOverflow = "ellipsis";
+    bindTip(el, name, () => p);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
@@ -523,6 +559,8 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     name.textContent = e.name;
     row.append(ico, name);
     wrap.appendChild(row);
+
+    bindTip(row, name, () => e.path);
 
     row.oncontextmenu = (ev) => {
       ev.preventDefault();
@@ -1128,6 +1166,8 @@ async function boot() {
     saveCtxs();
     setMsg(`已打开 ${dir}`);
   };
+  $("#tree").addEventListener("scroll", hideTip, true);
+
   $("#tree").addEventListener("contextmenu", (ev) => {
     const t = ev.target as HTMLElement;
     if (t.closest(".node")) return; // 行上自己有菜单
@@ -1183,6 +1223,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       saveCtxs();
     }
   };
+
+  $("#tree").addEventListener("scroll", hideTip, true);
 
   $("#tree").addEventListener("contextmenu", (ev) => {
     const t = ev.target as HTMLElement;
