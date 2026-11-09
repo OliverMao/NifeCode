@@ -17,8 +17,8 @@ pub struct FwdState(pub Mutex<HashMap<u32, (Forward, Child)>>, pub std::sync::at
 
 /// ssh -N -L：本地端口 → 远端服务的隧道（Jupyter / TensorBoard / 数据库）
 #[tauri::command]
-pub fn fwd_start(
-    st: State<FwdState>,
+pub async fn fwd_start(
+    st: State<'_, FwdState>,
     target: String,
     port: u16,
     local: u16,
@@ -92,12 +92,12 @@ pub fn fwd_start(
 }
 
 #[tauri::command]
-pub fn fwd_list(st: State<FwdState>) -> Vec<Forward> {
+pub fn fwd_list(st: State<'_, FwdState>) -> Vec<Forward> {
     st.0.lock().unwrap().values().map(|(f, _)| f.clone()).collect()
 }
 
 #[tauri::command]
-pub fn fwd_stop(st: State<FwdState>, id: u32) {
+pub fn fwd_stop(st: State<'_, FwdState>, id: u32) {
     if let Some((_, mut child)) = st.0.lock().unwrap().remove(&id) {
         let _ = child.kill();
         let _ = child.wait();
@@ -105,7 +105,7 @@ pub fn fwd_stop(st: State<FwdState>, id: u32) {
 }
 
 #[tauri::command]
-pub fn fwd_stop_all(st: State<FwdState>) {
+pub fn fwd_stop_all(st: State<'_, FwdState>) {
     let mut guard = st.0.lock().unwrap();
     for (_, (_, mut child)) in guard.drain() {
         let _ = child.kill();

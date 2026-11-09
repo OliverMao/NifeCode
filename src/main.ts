@@ -114,6 +114,10 @@ function switchContext(id: string) {
   if (!contexts.some((c) => c.id === id)) return;
   activeId = id;
   applyActive();
+  const prof = contexts.some((c) => c.id === id && c.kind === "ssh")
+    ? sshProfiles().find((p) => `ssh:${p.id}` === id)
+    : undefined;
+  if (prof) void invoke("ssh_set_identity", { key: prof.key ?? null }).catch(() => {});
   renderCtxBar();
   setConnLabel();
   renderSsh();
@@ -173,8 +177,8 @@ window.addEventListener("unhandledrejection", (e) => { lastError = String(e.reas
 function setMsg(msg: string) {
   $<HTMLSpanElement>("#st-msg").textContent = msg;
 }
-function setConnLabel() {
-  $<HTMLSpanElement>("#st-conn").textContent = host ? `SSH ${host}` : "本地";
+function setConnLabel(pending?: string) {
+  $<HTMLSpanElement>("#st-conn").textContent = pending ?? (host ? `SSH ${host}` : "本地");
 }
 
 // ---------- 模态框 ----------
@@ -506,22 +510,13 @@ async function editProfile(existing?: SshProfile) {
   await connectProfile(profile);
 }
 
+let connecting = false;
+
 async function connectProfile(p: SshProfile) {
-  if (host) {
-    const r = await ask("已经连着 SSH", `当前连的是 ${host}，要先断开吗？`, [
-      { label: "断开并切换", value: "switch", primary: true },
-      { label: "取消", value: "cancel" },
-    ]);
-    if (r !== "switch") return;
-    await invoke("ssh_close").catch(() => {});
-    await invoke("fwd_stop_all").catch(() => {});
-    host = null;
-  }
-  setMsg(`正在连接 ${p.name} …`);
+  if (connecting) return; // 连按两下不会连两次
+  connecting = true;
   try {
-    await invoke("ssh_set_identity", { key: p.key ?? null });
-    const home = await invoke<string>("ssh_home", { target: p.target, port: p.port });
-    // 先存下当前上下文，再切到新连接
+    // 先把标签插进去（"连接中…"），别让用户点完看不到任何反应
     const prev = curCtx();
     prev.root = root;
     prev.host = host;
@@ -530,28 +525,53 @@ async function connectProfile(p: SshProfile) {
     const cid = `ssh:${p.id}`;
     let c = contexts.find((x) => x.id === cid);
     if (!c) {
-      c = { id: cid, kind: "ssh", label: p.name, host: p.target, port: p.port, root: home };
+      c = { id: cid, kind: "ssh", label: p.name, host: p.target, port: p.port, root: null };
       contexts.push(c);
     } else {
       c.label = p.name;
       c.host = p.target;
       c.port = p.port;
-      c.root = home;
     }
     activeId = cid;
     applyActive();
     renderCtxBar();
-    setConnLabel();
+    setConnLabel("连接中…");
     renderSsh();
-    await openRoot(home);
-    setMsg(`已连接 ${p.name}（${home}）`);
-  } catch (e) {
-    host = null;
-    port = 22;
-    await invoke("ssh_set_identity", { key: null }).catch(() => {});
-    setConnLabel();
-    renderSsh();
-    await ask("连接失败", String(e), [{ label: "好", value: "ok", primary: true }]);
+    $("#tree").innerHTML = "";
+    expanded.clear();
+
+    setMsg(`正在连接 ${p.name}（${p.target}）…`);
+    try {
+      await invoke("ssh_set_identity", { key: p.key ?? null });
+      // 前端兜个底：即使后端出意外，20 秒后也不再等
+      const home = await Promise.race([
+        invoke<string>("ssh_home", { target: p.target, port: p.port }),
+        new Promise<string>((_, rej) => setTimeout(() => rej("连接超时（20 秒）"), 20000)),
+      ]);
+      c.root = home;
+      applyActive();
+      renderCtxBar();
+      setConnLabel();
+      renderSsh();
+      await openRoot(home);
+      setMsg(`已连接 ${p.name}（${home}）`);
+    } catch (e) {
+      // 连不上就把这个空标签收回，别再留个死标签
+      contexts.splice(contexts.indexOf(c), 1);
+      activeId = prev.id;
+      applyActive();
+      renderCtxBar();
+      setConnLabel();
+      renderSsh();
+      if (root) void renderTree(root, $("#tree"), 0);
+      void invoke("ssh_set_identity", { key: null }).catch(() => {});
+      setMsg(`连接 ${p.name} 失败`);
+      await ask("连接失败", `${p.target}:${p.port}
+
+${String(e)}`, [{ label: "好", value: "ok", primary: true }]);
+    }
+  } finally {
+    connecting = false;
   }
 }
 

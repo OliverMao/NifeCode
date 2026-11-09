@@ -75,7 +75,18 @@ cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
 
 - `＋` 新建：名称 / `user@host`（也支持 `~/.ssh/config` 里的别名）/ 端口 / 私钥路径（可选）/ **密码（可选）**
 - 点一行直接连；鼠标悬停出现 `✎` 编辑、`✕` 删除
-- 已连接的那条高亮显示；再点别的会问要不要切换
+- **点下去 80ms 内顶部就多一个标签**（状态栏显示"连接中…"），连上后填内容；连不上就把那个空标签收回并弹原因，不会留个死标签
+- 不同机器可以**同时连着**，各自一个上下文标签，随时切
+
+### 连接为什么不会卡
+
+三个坑都踩过并修掉了：
+
+1. **sync 命令跑在主线程** → 一次 ssh 就能把整个界面冻住。现在所有 IO 命令都是 `async`，界面永远不阻塞（实测连接过程中主线程最大卡顿 **6ms**）
+2. **askpass 助手没被认出来** → Windows 的 ssh 调 askpass 时只传提示语、不带 `--askpass` 参数，结果每次都把整个 GUI 又启一遍、密码永远送不到，ssh 一直等。现在改成看环境变量 `NIFECODE_ASKPASS` 判断
+3. **失败会重试两遍** → 通道失败后回落成一次性 ssh，等于把认证又走一遍（慢一倍，还可能触发服务器 fail2ban）。现在认证类错误（`Permission denied` / host key）直接返回，而且 `NumberOfPasswordPrompts=1`
+
+超时也都设了：`ConnectTimeout=8`、`ServerAliveInterval=5`×3、前端 20 秒兜底。
 - 私钥路径填了就用 `-i`，留空走 ssh-agent / 默认密钥
 
 ### 密码怎么存的
@@ -170,7 +181,7 @@ cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
 
 | 操作 | 每次新开 ssh | 常驻通道 |
 |---|---|---|
-| 连接（一次性，含开通道） | — | 3.4s |
+| 连接（一次性，含开通道） | — | 2.2s |
 | 列目录 | 3.0s | **0.25s** |
 | 打开文件 | 3.1s | **0.26s** |
 | 保存 | 3.2s | **0.24s** |

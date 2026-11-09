@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct Session {
     child: Child,
@@ -43,17 +43,47 @@ impl Session {
             .arg("bash")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("起 ssh 失败：{e}"))?;
         let stdin = child.stdin.take().ok_or("拿不到 ssh stdin")?;
         let stdout = child.stdout.take().ok_or("拿不到 ssh stdout")?;
+
+        // ssh 把"密码错了""主机不可达"都写在 stderr 上，不接着就只能回一句"通道断了"
+        let errbuf = Arc::new(Mutex::new(String::new()));
+        if let Some(e) = child.stderr.take() {
+            let eb = errbuf.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut text = String::new();
+                let mut r = std::io::BufReader::new(e);
+                let _ = r.read_to_string(&mut text);
+                if let Ok(mut g) = eb.lock() {
+                    g.push_str(&text);
+                }
+            });
+        }
+
         let mut s = Session { child, stdin, out: BufReader::new(stdout), seq: 0 };
         // 先打个标记把 banner / .bashrc 输出吃掉
-        let (code, _) = s.exec_raw("echo ready")?;
-        if code != 0 {
-            return Err("远端 bash 没起来".into());
+        let r = s.exec_raw("echo ready");
+        let ok = matches!(&r, Ok((0, out)) if String::from_utf8_lossy(out).contains("ready"));
+        if ok {
+            return Ok(s);
         }
-        Ok(s)
+        s.kill();
+        std::thread::sleep(std::time::Duration::from_millis(80)); // 等 stderr 读完
+        let detail = errbuf.lock().map(|g| g.trim().to_string()).unwrap_or_default();
+        let base = match r {
+            Ok((code, _)) => format!("远端 bash 没起来（退出码 {code}）"),
+            Err(e) => e,
+        };
+        // stderr 里有 ssh 的真实原因（密码错 / 连不上），就用它当错误信息
+        Err(if detail.is_empty() { base } else { detail })
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     fn exec_raw(&mut self, command: &str) -> Result<(i32, Vec<u8>), String> {
@@ -99,8 +129,15 @@ impl Session {
     }
 }
 
-fn pool() -> &'static Mutex<HashMap<String, Session>> {
-    static POOL: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
+impl Drop for Session {
+    fn drop(&mut self) {
+        // 通道废弃时必须把 ssh 子进程收掉，否则每失败一次就漏一个 ssh
+        self.kill();
+    }
+}
+
+fn pool() -> &'static Mutex<HashMap<String, Arc<Mutex<Session>>>> {
+    static POOL: OnceLock<Mutex<HashMap<String, Arc<Mutex<Session>>>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -109,30 +146,55 @@ fn key_of(target: &str, port: u16) -> String {
 }
 
 /// 通过常驻通道执行；通道没建起来就返回 Err，让调用方回落到普通 ssh
+///
+/// 注意：`Session::open` 是慢操作（一次完整 ssh 握手，慢链路能到几秒），
+/// 所以**绝对不能持有全局 pool 锁去开通道**，否则同一时刻所有远端操作都得排队。
 pub fn exec(target: &str, port: u16, command: &str) -> Result<(i32, Vec<u8>), String> {
     // ssh 通道里跑的是 bash，命令里不能有换行
     let one_line = command.replace('\n', " ");
     let k = key_of(target, port);
-    let mut guard = pool().lock().unwrap_or_else(|e| e.into_inner());
-    if !guard.contains_key(&k) {
-        guard.insert(k.clone(), Session::open(target, port)?);
-    }
-    let sess = guard.get_mut(&k).ok_or("通道不存在")?;
-    let r = sess.exec_raw(&one_line);
+
+    // 快路径：通道已经在
+    let existing = lock_pool().get(&k).cloned();
+    let sess = match existing {
+        Some(a) => a,
+        None => {
+            let fresh = Arc::new(Mutex::new(Session::open(target, port)?));
+            let mut g = lock_pool();
+            match g.get(&k).cloned() {
+                // 别人抢先建好了：用他那条，自己这条丢掉（Drop 会杀掉 ssh）
+                Some(other) => {
+                    drop(g);
+                    drop(fresh);
+                    other
+                }
+                None => {
+                    g.insert(k.clone(), fresh.clone());
+                    fresh
+                }
+            }
+        }
+    };
+
+    let r = {
+        let mut s = sess.lock().unwrap_or_else(|e| e.into_inner());
+        s.exec_raw(&one_line)
+    };
     if r.is_err() {
-        // 通道坏了就丢掉，下次重开
-        guard.remove(&k);
+        // 通道坏了就丢掉，下次重开（Arc 落到底时 Drop 杀 ssh）
+        lock_pool().remove(&k);
     }
     r
 }
 
 /// 断开连接时把通道里的 ssh 子进程杀掉
 pub fn close_all() {
-    let mut guard = pool().lock().unwrap_or_else(|e| e.into_inner());
-    for (_, mut s) in guard.drain() {
-        let _ = s.child.kill();
-        let _ = s.child.wait();
-    }
+    let drained: Vec<Arc<Mutex<Session>>> = lock_pool().drain().map(|(_, v)| v).collect();
+    drop(drained); // 最后一个 Arc 落地时 Session::drop 会 kill + wait
+}
+
+fn lock_pool() -> std::sync::MutexGuard<'static, HashMap<String, Arc<Mutex<Session>>>> {
+    pool().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn b64_encode(bytes: &[u8]) -> String {

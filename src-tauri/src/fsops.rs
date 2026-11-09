@@ -34,7 +34,7 @@ static IDENTITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// 断开连接时把常驻通道里的 ssh 进程收掉
 #[tauri::command]
-pub fn ssh_close() {
+pub async fn ssh_close() {
     crate::session::close_all();
 }
 
@@ -61,12 +61,12 @@ pub(crate) fn lookup_password(target: &str, port: u16) -> Option<String> {
 }
 
 #[tauri::command]
-pub fn ssh_has_password(target: String, port: u16) -> bool {
+pub async fn ssh_has_password(target: String, port: u16) -> bool {
     lookup_password(&target, port).is_some()
 }
 
 #[tauri::command]
-pub fn ssh_save_password(target: String, port: u16, password: String) -> Result<(), String> {
+pub async fn ssh_save_password(target: String, port: u16, password: String) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, &cred_user(&target, port))
         .map_err(|e| format!("打开凭据存储失败：{e}"))?;
     if password.is_empty() {
@@ -79,7 +79,7 @@ pub fn ssh_save_password(target: String, port: u16, password: String) -> Result<
 }
 
 #[tauri::command]
-pub fn ssh_forget_password(target: String, port: u16) {
+pub async fn ssh_forget_password(target: String, port: u16) {
     if let Ok(e) = keyring::Entry::new(KEYRING_SERVICE, &cred_user(&target, port)) {
         let _ = e.delete_credential();
     }
@@ -104,12 +104,24 @@ pub(crate) fn secret_env(target: &str, port: u16) -> Vec<(String, String)> {
 
 fn ssh_args(target: &str, port: u16) -> Vec<String> {
     let mut v: Vec<String> = vec![
-        "-o".into(), "ConnectTimeout=10".into(),
+        "-o".into(), "ConnectTimeout=8".into(),
         "-o".into(), "StrictHostKeyChecking=accept-new".into(),
+        // 常驻通道大部分时间是闲着的：靠 keepalive 保活，同时让"对端已经没了"能在 ~15s 内被发现，
+        // 而不是让读操作无限期挂着（这是之前界面卡死的根因之一）
+        "-o".into(), "ServerAliveInterval=5".into(),
+        "-o".into(), "ServerAliveCountMax=3".into(),
+        // 密码错了只试一次：默认会连试 3 次密码 + keyboard-interactive，
+        // 每次都要重新拉起 askpass，输错密码要等 10 秒才报错
+        "-o".into(), "NumberOfPasswordPrompts=1".into(),
     ];
-    if lookup_password(target, port).is_none() {
+    let has_pw = lookup_password(target, port).is_some();
+    if !has_pw {
         v.insert(0, "-o".into());
         v.insert(1, "BatchMode=yes".into());
+    } else if current_identity().is_none() {
+        // 只存了密码、没配私钥：别再去探测 publickey，省一个往返（2.2s → 1.8s）
+        v.push("-o".into());
+        v.push("PreferredAuthentications=password,keyboard-interactive".into());
     }
     // Windows 的 OpenSSH 多路复用不稳（实测会 Connection reset by peer），默认关闭；
     // 想试可以设 NIFECODE_MULTIPLEX=1
@@ -165,7 +177,17 @@ pub(crate) fn ssh_exec(target: &str, port: u16, cmd: &str) -> Result<Vec<u8>, St
                 msg
             });
         }
-        Err(_) => { /* 通道用不了，回落成一次性 ssh */ }
+        Err(e) => {
+            // 认证类错误回落也没用（只会把同样的认证再试一遍，慢一倍，还可能触发 fail2ban）
+            let low = e.to_lowercase();
+            if low.contains("permission denied")
+                || low.contains("authentication failed")
+                || low.contains("host key verification failed")
+            {
+                return Err(e);
+            }
+            /* 其它原因（比如远端没有 bash）才回落成一次性 ssh */
+        }
     }
     let out = ssh_command(target, port)
         .arg(target)
@@ -202,7 +224,7 @@ fn sort_entries(v: &mut [Entry]) {
 }
 
 #[tauri::command]
-pub fn read_dir(host: Option<String>, port: u16, path: String) -> Result<Vec<Entry>, String> {
+pub async fn read_dir(host: Option<String>, port: u16, path: String) -> Result<Vec<Entry>, String> {
     match host {
         None => {
             let mut out = Vec::new();
@@ -237,7 +259,7 @@ pub fn read_dir(host: Option<String>, port: u16, path: String) -> Result<Vec<Ent
 }
 
 #[tauri::command]
-pub fn read_file(host: Option<String>, port: u16, path: String) -> Result<ReadFile, String> {
+pub async fn read_file(host: Option<String>, port: u16, path: String) -> Result<ReadFile, String> {
     match host {
         None => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
@@ -282,7 +304,7 @@ pub fn read_file(host: Option<String>, port: u16, path: String) -> Result<ReadFi
 }
 
 #[tauri::command]
-pub fn write_file(
+pub async fn write_file(
     host: Option<String>,
     port: u16,
     path: String,
@@ -313,7 +335,7 @@ pub fn write_file(
 
 /// 一次拿多个文件的 mtime（轮询外部改动用），远端只跑一条命令
 #[tauri::command]
-pub fn stat_files(host: Option<String>, port: u16, paths: Vec<String>) -> Result<Vec<u64>, String> {
+pub async fn stat_files(host: Option<String>, port: u16, paths: Vec<String>) -> Result<Vec<u64>, String> {
     match host {
         None => Ok(paths
             .iter()
@@ -344,7 +366,7 @@ pub fn stat_files(host: Option<String>, port: u16, paths: Vec<String>) -> Result
 }
 
 #[tauri::command]
-pub fn stat_file(host: Option<String>, port: u16, path: String) -> Result<u64, String> {
+pub async fn stat_file(host: Option<String>, port: u16, path: String) -> Result<u64, String> {
     match host {
         None => std::fs::metadata(&path)
             .map(|m| mtime_ms(&m))
@@ -362,7 +384,7 @@ pub fn pick_folder() -> Option<String> {
 }
 
 #[tauri::command]
-pub fn ssh_home(target: String, port: u16) -> Result<String, String> {
+pub async fn ssh_home(target: String, port: u16) -> Result<String, String> {
     let raw = ssh_exec(&target, port, "echo $HOME")?;
     let home = String::from_utf8_lossy(&raw).trim().to_string();
     if home.is_empty() {
@@ -440,7 +462,7 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
 
 /// 本地走进程内遍历；远端跑一条 grep（GPU 服务器上肯定有 grep）
 #[tauri::command]
-pub fn search(
+pub async fn search(
     host: Option<String>,
     port: u16,
     cwd: String,
