@@ -141,6 +141,7 @@ function switchContext(id: string) {
   if (!contexts.some((c) => c.id === id)) return;
   activeId = id;
   applyActive();
+  bindTermSet();
   const prof = contexts.some((c) => c.id === id && c.kind === "ssh")
     ? sshProfiles().find((p) => `ssh:${p.id}` === id)
     : undefined;
@@ -148,8 +149,9 @@ function switchContext(id: string) {
   renderCtxBar();
   setConnLabel();
   renderSsh();
-  $("#tree").innerHTML = "";
   expanded.clear();
+  clearSel();
+  $("#tree").innerHTML = "";
   const c = curCtx();
   if (c.kind === "ssh" && c.online === false) {
     // 上次会话恢复出来的标签：点一下就重连，连上再回原来的目录
@@ -158,7 +160,7 @@ function switchContext(id: string) {
     void reconnectCtx(c);
     return;
   }
-  if (root) void renderTree(root, $("#tree"), 0);
+  if (root) void refreshTree();
   if ($("#scm").classList.contains("active")) void loadGit();
   else renderGit(null);
   setMsg(root ?? "未打开文件夹");
@@ -186,14 +188,17 @@ async function closeContext(id: string) {
       const next = contexts.find((x) => x.kind === "local") ?? contexts[0];
       activeId = next.id;
       applyActive();
-      $("#tree").innerHTML = "";
       expanded.clear();
-      if (root) void renderTree(root, $("#tree"), 0);
+  clearSel();
+      $("#tree").innerHTML = "";
+      if (root) void refreshTree();
       renderGit(null);
     }
     renderCtxBar();
     setConnLabel();
     saveCtxs();
+    dropTermSet(id);
+    bindTermSet();
     return;
   }
   // shortcut: 关任何一个 SSH 标签都会把所有常驻通道关掉，下次用再重开（约 3 秒）
@@ -204,14 +209,17 @@ async function closeContext(id: string) {
   if (activeId === id) {
     activeId = "local";
     applyActive();
-    $("#tree").innerHTML = "";
     expanded.clear();
-    if (root) void renderTree(root, $("#tree"), 0);
+  clearSel();
+    $("#tree").innerHTML = "";
+    if (root) void refreshTree();
     renderGit(null);
   }
   renderCtxBar();
   setConnLabel();
   saveCtxs();
+  dropTermSet(id);
+  bindTermSet();
   setMsg("已断开 SSH，回到本机");
 }
 
@@ -607,7 +615,7 @@ function applyFontSize(px: number) {
   // 界面字号也跟着变：文件树、标签、状态栏、面板一起缩放
   document.documentElement.style.setProperty("--ui", `${fontSize}px`);
   editor.setFontSize(fontSize);
-  terms.setFontSize(fontSize);
+  for (const set of termSets.values()) set.host.setFontSize(fontSize);
   setMsg(`字号 ${fontSize}px`);
 }
 
@@ -972,7 +980,28 @@ function paintIcon(el: HTMLElement, name: string, isDir: boolean, path: string) 
 // ---------- 资源管理器：右键菜单 + 自动刷新 ----------
 type MenuItem = { label: string; run: () => void } | "sep";
 
-let clip: { path: string; host: string | null; port: number; cut: boolean } | null = null;
+let clip: { paths: string[]; host: string | null; port: number; cut: boolean } | null = null;
+
+// 文件树多选：点一下单选，Ctrl 点切换，Shift 点连选一段
+const sel = new Set<string>();
+let selAnchor = "";
+
+/** 换工作区/上下文时清掉多选（路径已经不是同一套了） */
+function clearSel() {
+  sel.clear();
+  selAnchor = "";
+}
+
+function paintSel() {
+  for (const n of document.querySelectorAll<HTMLElement>(".node")) {
+    n.classList.toggle("active", sel.has(n.dataset.path!));
+  }
+}
+
+/** 右键/操作要用到的那批路径：点在已选中的行上就整批算，否则只算这一行 */
+function picked(path: string): string[] {
+  return sel.has(path) && sel.size > 1 ? [...sel] : [path];
+}
 
 function showMenu(x: number, y: number, items: MenuItem[]) {
   const m = $("#ctxmenu");
@@ -1034,24 +1063,29 @@ async function askText(title: string, label: string, value = ""): Promise<string
   return v || null;
 }
 
-function treeMenu(e: Entry): MenuItem[] {
+function treeMenu(e: Entry, paths: string[]): MenuItem[] {
   const dir = e.is_dir ? e.path : parentOf(e.path);
+  const multi = paths.length > 1;
   const items: MenuItem[] = [
     { label: "新建文件", run: () => void newEntry(dir, false) },
     { label: "新建文件夹", run: () => void newEntry(dir, true) },
   ];
-  if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(dir) });
+  if (clip) {
+    const nm = clip.paths.length > 1 ? `${clip.paths.length} 项` : baseName(clip.paths[0]);
+    items.push({ label: `粘贴「${nm}」`, run: () => void pasteInto(dir) });
+  }
   items.push("sep");
-  if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
+  if (multi) items.push({ label: `${paths.length} 项已选择`, run: () => {} });
+  else if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
   else items.push({ label: "在此打开工作区", run: () => void openRoot(e.path) });
   items.push(
-    { label: "复制绝对路径", run: () => copyText(e.path) },
-    { label: "复制相对路径", run: () => copyText(relPath(e.path)) },
+    { label: multi ? `复制 ${paths.length} 个路径` : "复制绝对路径", run: () => copyText(paths.join("\n")) },
+    ...(multi ? [] : [{ label: "复制相对路径", run: () => copyText(relPath(e.path)) } as MenuItem]),
     "sep",
-    { label: "复制", run: () => setClip(e.path, false) },
-    { label: "剪切", run: () => setClip(e.path, true) },
-    { label: "重命名", run: () => void renameEntry(e.path) },
-    { label: "删除", run: () => void deleteEntry(e.path) },
+    { label: multi ? `复制 ${paths.length} 项` : "复制", run: () => setClip(paths, false) },
+    { label: multi ? `剪切 ${paths.length} 项` : "剪切", run: () => setClip(paths, true) },
+    ...(multi ? [] : [{ label: "重命名", run: () => void renameEntry(e.path) } as MenuItem]),
+    { label: multi ? `删除 ${paths.length} 项` : "删除", run: () => void deleteEntry(paths) },
     "sep",
     { label: "在终端中打开", run: () => { showTerm(true); void terms.newTerminal(undefined, dir); } }
   );
@@ -1082,9 +1116,10 @@ function relPath(p: string): string {
   return q.startsWith(`${r}/`) ? q.slice(r.length + 1) : q;
 }
 
-function setClip(path: string, cut: boolean) {
-  clip = { path, host, port, cut };
-  setMsg(`${cut ? "已剪切" : "已复制"} ${baseName(path)}`);
+function setClip(paths: string[], cut: boolean) {
+  clip = { paths, host, port, cut };
+  const nm = paths.length > 1 ? `${paths.length} 项` : baseName(paths[0]);
+  setMsg(`${cut ? "已剪切" : "已复制"} ${nm}`);
 }
 
 async function newEntry(dir: string, isDir: boolean) {
@@ -1114,49 +1149,66 @@ async function renameEntry(path: string) {
   }
 }
 
-async function deleteEntry(path: string) {
-  const r = await ask("删除", `确定删除「${baseName(path)}」？<br/><span style="color:#e2c08d">远程目录会递归删除，不可恢复。</span>`, [
+async function deleteEntry(paths: string[]) {
+  const one = paths.length === 1;
+  const r = await ask("删除", `确定删除${one ? `「${baseName(paths[0])}」` : `这 ${paths.length} 项`}？<br/><span style="color:#e2c08d">远程目录会递归删除，不可恢复。</span>`, [
     { label: "删除", value: "ok", primary: true },
     { label: "取消", value: "no" },
   ]);
   if (r !== "ok") return;
-  try {
-    await invoke("fs_delete", { ...connArg(), path });
-    await refreshTree();
-    setMsg(`已删除 ${path}`);
-  } catch (err) {
-    setMsg(`删除失败：${err}`);
+  let done = 0;
+  for (const p of paths) {
+    try {
+      await invoke("fs_delete", { ...connArg(), path: p });
+      sel.delete(p);
+      done += 1;
+    } catch (err) {
+      setMsg(`删除失败：${baseName(p)} —— ${err}`);
+    }
   }
+  await refreshTree();
+  if (done) setMsg(one ? `已删除 ${paths[0]}` : `已删除 ${done} 项`);
 }
 
 async function pasteInto(dir: string) {
   if (!clip) return;
-  const to = joinPath(dir, baseName(clip.path));
-  if (to === clip.path) {
+  const cmd = clip.cut ? "fs_rename" : "fs_copy";
+  const from = clip.paths;
+  const host_ = clip.host;
+  const port_ = clip.port;
+  let done = 0;
+  for (const p of from) {
+    const to = joinPath(dir, baseName(p));
+    if (to === p) continue; // 目标就是原位置，跳过
+    try {
+      await invoke(cmd, { host: host_, port: port_, from: p, to });
+      done += 1;
+    } catch (err) {
+      setMsg(`粘贴失败：${baseName(p)} —— ${err}`);
+    }
+  }
+  if (!done) {
     setMsg("目标就是原位置");
     return;
   }
-  try {
-    const cmd = clip.cut ? "fs_rename" : "fs_copy";
-    const args = clip.cut
-      ? { host: clip.host, port: clip.port, from: clip.path, to }
-      : { host: clip.host, port: clip.port, from: clip.path, to };
-    await invoke(cmd, args);
-    setMsg(`${clip.cut ? "已移动" : "已复制"}到 ${to}`);
-    if (clip.cut) clip = null;
-    await refreshTree();
-  } catch (err) {
-    setMsg(`粘贴失败：${err}`);
-  }
+  setMsg(`${clip.cut ? "已移动" : "已复制"} ${done} 项到 ${dir}`);
+  if (clip.cut) clip = null;
+  await refreshTree();
 }
 
 let treeSig = "";
+let treeGen = 0;
 async function refreshTree() {
   if (!root) return;
-  const active = document.querySelector<HTMLElement>(".node.active")?.dataset.path;
-  $("#tree").innerHTML = "";
-  await renderTree(root, $("#tree"), 0, true);
-  if (active) document.querySelector<HTMLElement>(`.node[data-path="${CSS.escape(active)}"]`)?.classList.add("active");
+  const gen = ++treeGen;
+  // 先画到离线节点上，画完再整体换掉 #tree。
+  // 远端一次 read_dir 要跑一趟 ssh，删除后的刷新很容易和定时轮询撞在一起，
+  // 之前是先清空再异步追加，两次刷新会各追加一遍 —— 列表就重复显示了一份。
+  const box = document.createElement("div");
+  await renderTree(root, box, 0, true);
+  if (gen !== treeGen) return; // 期间又发起了一次刷新，这次的结果丢掉
+  $("#tree").replaceChildren(...box.children);
+  paintSel(); // 重建行以后把多选高亮补回来
   treeSig = "";
   fileCache = null;
 }
@@ -1205,18 +1257,41 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
 
     bindTip(row, name, () => e.path);
 
+    const select = (ev: MouseEvent) => {
+      const all = [...document.querySelectorAll<HTMLElement>(".node")];
+      if (ev.shiftKey && selAnchor) {
+        const a = all.findIndex((r) => r.dataset.path === selAnchor);
+        const b = all.indexOf(row);
+        sel.clear();
+        for (let i = Math.min(a, b), hi = Math.max(a, b); a >= 0 && i <= hi; i++) sel.add(all[i].dataset.path!);
+      } else if (ev.ctrlKey || ev.metaKey) {
+        if (sel.has(e.path)) sel.delete(e.path);
+        else sel.add(e.path);
+        selAnchor = e.path;
+      } else {
+        sel.clear();
+        sel.add(e.path);
+        selAnchor = e.path;
+      }
+      paintSel();
+    };
+
     row.oncontextmenu = (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      if (!e.is_dir) {
-        document.querySelectorAll(".node.active").forEach((n) => n.classList.remove("active"));
-        row.classList.add("active");
+      if (!sel.has(e.path)) {
+        sel.clear();
+        sel.add(e.path);
+        selAnchor = e.path;
+        paintSel();
       }
-      showMenu(ev.clientX, ev.clientY, treeMenu(e));
+      showMenu(ev.clientX, ev.clientY, treeMenu(e, picked(e.path)));
     };
 
     if (e.is_dir) {
-      row.onclick = async () => {
+      row.onclick = async (ev) => {
+        select(ev);
+        if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return; // 多选时不展开/打开
         if (expanded.has(e.path)) {
           expanded.delete(e.path);
           row.nextElementSibling?.remove();
@@ -1237,9 +1312,9 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
         await renderTree(e.path, sub, depth + 1, true);
       }
     } else {
-      row.onclick = () => {
-        document.querySelectorAll(".node.active").forEach((n) => n.classList.remove("active"));
-        row.classList.add("active");
+      row.onclick = (ev) => {
+        select(ev);
+        if (ev.ctrlKey || ev.metaKey || ev.shiftKey) return; // 多选时不打开文件
         void openFile(e.path);
       };
     }
@@ -1257,13 +1332,12 @@ async function openRoot(path: string) {
   }
   saveCtxs();
   expanded.clear();
+  clearSel();
   $("#tree").innerHTML = "";
-  await renderTree(path, $("#tree"), 0);
-  // 终端 cwd 跟随工作区（cwd 是回调，不用重建），首次打开顺手起一个
-  if (terms.count() === 0) {
-    showTerm(true);
-    void terms.newTerminal();
-  }
+  await refreshTree();
+  // 终端 cwd 跟随工作区（cwd 是回调，不用重建），首次打开顺手起一个；
+  // 但终端栏是收着的就别自己弹出来（连 SSH 时也会走到这里）
+  if (terms.count() === 0 && !$("#term-col").classList.contains("collapsed")) void terms.newTerminal();
   setMsg(path);
   void loadGit();
 }
@@ -1285,20 +1359,61 @@ function currentShellName(): string {
   return s?.name ?? "终端";
 }
 
-const terms = new TerminalHost(
-  $("#terms"),
-  $("#term-tabs"),
-  () => root ?? undefined,
-  () => (host ? { target: host, port } : null),
-  () => {
-    const s = shellList.find((x) => x.id === preferredShell) ?? shellList[0];
-    return s ? { id: s.id, name: s.name } : null;
-  }
-);
+// 终端跟着上下文走：本机 1、本机 2、每个 SSH 各有一套页和终端，切换标签就换一整套
+interface TermSet { host: TerminalHost; wrap: HTMLElement }
+const termSets = new Map<string, TermSet>();
+let terms!: TerminalHost;
+
+/** 当前上下文的终端组，第一次用到的时候才建 */
+function termSet(): TermSet {
+  const c = curCtx();
+  const got = termSets.get(c.id);
+  if (got) return got;
+  const wrap = document.createElement("div");
+  wrap.className = "term-set";
+  wrap.innerHTML = `<div class="term-tabs"></div><div class="terms"></div>`;
+  $("#term-host").appendChild(wrap);
+  // 回调按"这套终端属于哪个上下文"取信息，切走以后也不会串到别的项目
+  const self = () => contexts.find((x) => x.id === c.id) ?? c;
+  const host = new TerminalHost(
+    wrap.querySelector<HTMLElement>(".terms")!,
+    wrap.querySelector<HTMLElement>(".term-tabs")!,
+    () => self().root ?? undefined,
+    () => (self().host ? { target: self().host!, port: self().port } : null),
+    () => {
+      const sh = shellList.find((x) => x.id === preferredShell) ?? shellList[0];
+      return sh ? { id: sh.id, name: sh.name } : null;
+    },
+  );
+  const set = { host, wrap };
+  termSets.set(c.id, set);
+  return set;
+}
+
+/** 切上下文时把终端也换过去（隐藏的那几套不销毁，切回来还在） */
+function bindTermSet() {
+  const id = curCtx().id;
+  const set = termSet();
+  for (const [k, v] of termSets) v.wrap.style.display = k === id ? "" : "none";
+  terms = set.host;
+  // 刚显示出来时 xterm 还拿着隐藏时算出的 0 尺寸，重排一次
+  requestAnimationFrame(() => { terms.relayoutAll(); terms.fitAll(); });
+}
+
+/** 关掉某个上下文：它的终端和 PTY 一起走 */
+function dropTermSet(id: string) {
+  const set = termSets.get(id);
+  if (!set) return;
+  set.host.dispose();
+  set.wrap.remove();
+  termSets.delete(id);
+}
 
 function showTerm(on: boolean) {
   $("#term-col").classList.toggle("collapsed", !on);
   $("#app").classList.toggle("no-term", !on);
+  // 收起以后只剩状态栏这个入口能点回来，所以它得一直显示并反映当前状态
+  $("#st-term").classList.toggle("off", !on);
   if (on) requestAnimationFrame(() => terms.fitAll());
 }
 
@@ -1444,12 +1559,13 @@ async function connectProfile(p: SshProfile) {
     if (!c.wantRoot && c.root && c.root !== c.wantRoot) c.wantRoot = c.root;
     activeId = cid;
     applyActive();
+    bindTermSet(); // 连上就直接用这台机器的终端，不用再手点一下标签
     renderCtxBar();
     setConnLabel("连接中…");
     renderSsh();
     $("#tree").innerHTML = "";
     expanded.clear();
-
+    clearSel();
     setMsg(`正在连接 ${p.name}（${p.target}）…`);
     try {
       await invoke("ssh_set_identity", { key: p.key ?? null });
@@ -1473,10 +1589,12 @@ async function connectProfile(p: SshProfile) {
       else contexts.splice(contexts.indexOf(c), 1);
       activeId = prev.id;
       applyActive();
+      if (!wasOffline) dropTermSet(c.id);
+      bindTermSet();
       renderCtxBar();
       setConnLabel();
       renderSsh();
-      if (root) void renderTree(root, $("#tree"), 0);
+      if (root) void refreshTree();
       void invoke("ssh_set_identity", { key: null }).catch(() => {});
       setMsg(`连接 ${p.name} 失败`);
       await ask("连接失败", `${p.target}:${p.port}
@@ -1763,7 +1881,8 @@ async function boot() {
   setConnLabel();
   renderTabs();
 
-  $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newTerminal(); };
+  $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newPage(true); };
+  $<HTMLButtonElement>("#btn-split-term").onclick = () => { showTerm(true); void terms.newTerminal(); };
   // 界面小按钮统一用自绘 SVG（＋ ✕ ˅），别用字体里那些大小不一的符号
   for (const [id, name] of [
     ["#ctx-new", "plus"],
@@ -1771,6 +1890,7 @@ async function boot() {
     ["#btn-ssh-new", "plus"],
     ["#btn-shell", "chevron"],
     ["#btn-new-term", "plus"],
+    ["#btn-split-term", "split"],
     ["#btn-close-panel", "close"],
   ]) {
     const el = $(id);
@@ -1787,7 +1907,7 @@ async function boot() {
         preferredShell = sh.id;
         localStorage.setItem(SHELL_KEY, sh.id);
         showTerm(true);
-        void terms.newTerminal(sh.id);
+        void terms.newPage(true, sh.id);
         setMsg(`新终端：${sh.name}`);
       },
     }));
@@ -1872,6 +1992,13 @@ async function boot() {
     { passive: false }
   );
 
+  // 点树里的空白处 = 取消所有选择
+  $("#tree").addEventListener("click", (ev) => {
+    if ((ev.target as HTMLElement).closest(".node")) return;
+    clearSel();
+    paintSel();
+  });
+
   $("#tree").addEventListener("contextmenu", (ev) => {
     const t = ev.target as HTMLElement;
     if (t.closest(".node")) return; // 行上自己有菜单
@@ -1881,7 +2008,10 @@ async function boot() {
       { label: "新建文件", run: () => void newEntry(root!, false) },
       { label: "新建文件夹", run: () => void newEntry(root!, true) },
     ];
-    if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(root!) });
+    if (clip) {
+      const nm = clip.paths.length > 1 ? `${clip.paths.length} 项` : baseName(clip.paths[0]);
+      items.push({ label: `粘贴「${nm}」`, run: () => void pasteInto(root!) });
+    }
     items.push("sep", { label: "复制工作区路径", run: () => void copyText(root!) });
     showMenu(ev.clientX, ev.clientY, items);
   });
@@ -1892,8 +2022,9 @@ async function boot() {
 
   restoreCtxs();
   applyActive();
+  bindTermSet();
   renderCtxBar();
-  if (root) void renderTree(root, $("#tree"), 0);
+  if (root) void refreshTree();
   applyFontSize(fontSize);
   applyEditorSettings();
   void loadShells();
@@ -1909,6 +2040,7 @@ async function boot() {
     if (e.key === "Enter") { e.preventDefault(); void runReplace(); }
   });
   $<HTMLButtonElement>("#replace-all").onclick = () => void runReplace();
+  $<HTMLSpanElement>("#st-term").onclick = () => toggleTerm();
   $<HTMLSpanElement>("#st-fwd").onclick = async () => {
     const fwds = await invoke<Forward[]>("fwd_list").catch(() => []);
     if (!fwds.length) return;

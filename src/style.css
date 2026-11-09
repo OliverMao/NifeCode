@@ -300,9 +300,12 @@ body {
 #term-splitter:hover, #side-splitter:hover { background: var(--accent); opacity: .5; }
 #sidebar.collapsed ~ #main #side-splitter { display: none; }
 
-#term-tabs { display: flex; overflow-x: auto; flex: 0 0 auto; background: var(--bg-tab); height: 30px; }
-#term-tabs::-webkit-scrollbar { height: 0; }
-#term-tabs:empty { display: none; }
+/* 每个项目/SSH 一套终端，切换时只换显示的那套 */
+#term-host { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; }
+.term-set { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; }
+.term-tabs { display: flex; overflow-x: auto; flex: 0 0 auto; background: var(--bg-tab); height: 30px; }
+.term-tabs::-webkit-scrollbar { height: 0; }
+.term-tabs:empty { display: none; }
 .ttab {
   display: flex; align-items: center; gap: 6px; padding: 0 10px; cursor: pointer;
   border-right: 1px solid var(--border); color: #969696; font-size: calc(var(--ui) - 1px); white-space: nowrap;
@@ -312,17 +315,14 @@ body {
 .ttab .x svg { display: block; width: 11px; height: 11px; }
 .ttab .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
 
-#terms { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; }
+.terms { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; position: relative; }
+
+/* 这个项目还没开过终端时的提示，开第一个终端就藏起来 */
+.term-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #6b6b6b; font-size: calc(var(--ui) - 1px); }
 
 /* 一页 = 一组终端，页之间切换 */
 .term-page { display: none; flex: 1 1 0; min-height: 0; flex-direction: column; overflow: clip; }
 .term-page.active { display: flex; }
-
-.ttab-add {
-  background: transparent; border: 0; color: #969696; cursor: pointer;
-  padding: 0 10px; font-size: 13px; line-height: 1;
-}
-.ttab-add:hover { background: var(--hover); color: #fff; }
 
 /* 上下终端之间的分隔条：8px 好抓，中间一根可见的把手，别让人找不着 */
 .term-splitter-h {
@@ -379,6 +379,10 @@ body {
 #st-msg { color: #e6f3ff; }
 #st-bridge { opacity: .8; }
 #st-fwd { cursor: pointer; }
+#st-term { cursor: pointer; opacity: .85; }
+#st-term:hover { opacity: 1; text-decoration: underline; }
+#st-term.off { opacity: .55; }
+#st-term.off:hover { opacity: .9; }
 #st-about { cursor: pointer; opacity: .85; }
 #st-about:hover { opacity: 1; text-decoration: underline; }
 

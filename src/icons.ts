@@ -156,6 +156,8 @@ const CHROME: Record<string, string> = {
   plus: '<path d="M8 3.2v9.6M3.2 8h9.6"/>',
   close: '<path d="M4.1 4.1 11.9 11.9M11.9 4.1 4.1 11.9"/>',
   chevron: '<path d="M4.4 6.5 8 10.1l3.6-3.6"/>',
+  // 拆分终端：上下两格
+  split: '<rect x="2.5" y="2.5" width="11" height="4.6" rx="1.1"/><rect x="2.5" y="8.9" width="11" height="4.6" rx="1.1"/>',
 };
 
 export function chromeIcon(name: string): string {

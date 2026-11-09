@@ -72,12 +72,12 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 | 产物 | 路径 | 说明 |
 |---|---|---|
 | 免安装单文件 | `src-tauri/target/release/nifecode.exe` | 双击就跑，不写注册表、不进开始菜单，放哪都行 |
-| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.2_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
+| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.3_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
 
 两个都**不需要额外文件**（前端已内嵌进 exe）。免安装版就是那个普通 release 二进制，改个名而已：
 
 ```bash
-cp src-tauri/target/release/nifecode.exe NifeCode_0.1.2_x64_portable.exe
+cp src-tauri/target/release/nifecode.exe NifeCode_0.1.3_x64_portable.exe
 ```
 
 ## 自动更新
@@ -93,7 +93,7 @@ cp src-tauri/target/release/nifecode.exe NifeCode_0.1.2_x64_portable.exe
 
 没用 `tauri-plugin-updater`：那套只认 NSIS/MSI，要么弹安装器要么要求维护一对 minisign 密钥；单文件便携版用不上。
 
-更新源默认是 `https://api.github.com/repos/OliverMao/NifeCode/releases/latest`，会取最新 Release 里名字含 `portable` 的 `.exe`。**这个仓库现在是私有的，匿名请求会 404**，所以要么把仓库转公开，要么换个公开的中转地址：
+更新源默认是 `https://api.github.com/repos/OliverMao/NifeCode/releases/latest`，会取最新 Release 里名字含 `portable` 的 `.exe`。仓库已公开，匿名请求就能查；如果以后又转回私有（或想走自己的中转），用环境变量换地址：
 
 ```bash
 NIFECODE_UPDATE_URL="https://某处/latest.json" ./nifecode.exe
@@ -102,9 +102,9 @@ NIFECODE_UPDATE_URL="https://某处/latest.json" ./nifecode.exe
 `latest.json` 只需要 GitHub Release API 的那几个字段：
 
 ```json
-{ "tag_name": "v0.1.2", "body": "更新说明", "assets": [
-  { "name": "NifeCode_0.1.2_x64_portable.exe", "size": 17002496,
-    "browser_download_url": "https://.../NifeCode_0.1.2_x64_portable.exe" } ] }
+{ "tag_name": "v0.1.3", "body": "更新说明", "assets": [
+  { "name": "NifeCode_0.1.3_x64_portable.exe", "size": 17185000,
+    "browser_download_url": "https://.../NifeCode_0.1.3_x64_portable.exe" } ] }
 ```
 
 ## 应用图标

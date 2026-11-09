@@ -48,22 +48,20 @@ export class TerminalHost {
   private activePage = -1;
   private started = false;
   private seqPage = 0;
-  private addBtn: HTMLButtonElement;
+  private empty: HTMLElement;
   private fontPx = 13; // 新开的终端也要用当前字号
 
   constructor(
-    private body: HTMLElement,   // #terms
-    private tabs: HTMLElement,   // #term-tabs（页标签栏）
+    private body: HTMLElement,   // .terms
+    private tabs: HTMLElement,   // .term-tabs（页标签栏）
     private cwd: () => string | undefined,
     private ssh: () => { target: string; port: number } | null = () => null,
     private shell: () => { id: string; name: string } | null = () => null,
   ) {
-    this.addBtn = document.createElement("button");
-    this.addBtn.className = "ttab-add";
-    this.addBtn.title = "新建一页（独立的一组终端）";
-    this.addBtn.innerHTML = chromeIcon("plus");
-    this.addBtn.onclick = () => this.newPage(true);
-    this.tabs.appendChild(this.addBtn);
+    this.empty = document.createElement("div");
+    this.empty.className = "term-empty";
+    this.empty.textContent = "这个标签还没有终端，点右上角 ＋ 新建";
+    this.body.appendChild(this.empty);
   }
 
   async init() {
@@ -95,16 +93,16 @@ export class TerminalHost {
     return this.pages.find((p) => p.id === id);
   }
 
-  /** 新建一页；withTerminal=true 时顺带开一个终端 */
-  newPage(withTerminal = true): Page {
+  /** 新建一页；withTerminal=true 时顺带开一个终端（可指定 shell） */
+  newPage(withTerminal = true, shellId?: string): Page {
     const no = ++this.seqPage;
     const el = document.createElement("div");
     el.className = "term-page";
 
     const tab = document.createElement("div");
     tab.className = "ttab";
-    tab.innerHTML = `<span class="tno">页 ${no}</span><span class="x">${chromeIcon("close")}</span>`;
-    this.tabs.insertBefore(tab, this.addBtn);
+    tab.innerHTML = `<span class="tno"></span><span class="x">${chromeIcon("close")}</span>`;
+    this.tabs.appendChild(tab);
     this.body.appendChild(el);
 
     const page: Page = { id: no, no, el, tab, panes: [] };
@@ -117,9 +115,9 @@ export class TerminalHost {
     });
 
     this.tidyTabs();
-    tab.title = `第 ${no} 页 · 一组独立终端`;
+    this.empty.style.display = "none";
     this.activatePage(page.id);
-    if (withTerminal) void this.newTerminal();
+    if (withTerminal) void this.newTerminal(shellId);
     return page;
   }
 
@@ -160,6 +158,7 @@ export class TerminalHost {
       return;
     }
     this.tidyTabs();
+    for (const p of this.pages) this.namePage(p); // 前面的页关掉后，后面的 (2) 要变回不带序号
     this.activatePage(this.pages[Math.min(idx, this.pages.length - 1)].id);
   }
 
@@ -349,6 +348,21 @@ export class TerminalHost {
     this.focus(page.panes[page.panes.length - 1].id);
   }
 
+  /** 标签文字 = 里头的终端名，重名按顺序加序号（PowerShell、PowerShell (2)），跟 VS Code 一致 */
+  private namePage(page: Page) {
+    const name = (p?: Pane) => p?.tag ?? "终端";
+    const base = name(page.panes[0]);
+    let dup = 0;
+    for (const p of this.pages) {
+      if (p === page) break;
+      if (name(p.panes[0]) === base) dup += 1;
+    }
+    const label = page.tab.querySelector(".tno");
+    if (label) label.textContent = dup ? `${base} (${dup + 1})` : base;
+    // 一页里叠了好几个终端时，悬浮能看到都有谁
+    page.tab.title = page.panes.map((p) => p.tag).join("\n");
+  }
+
   /** 一页里只有一个终端时不用显示它的小标题栏，两个以上才需要 */
   private syncHeads(page: Page) {
     const show = page.panes.length > 1;
@@ -363,6 +377,7 @@ export class TerminalHost {
   }
 
   private refresh(page: Page) {
+    this.namePage(page);
     this.renumber(page);
     this.rebuildSplitters(page);
     this.relayout(page);
@@ -383,7 +398,7 @@ export class TerminalHost {
       sp.ondblclick = () => {
         for (const x of page.panes) x.ratio = 1 / page.panes.length;
         this.relayout(page);
-        this.fitAll();
+        this.fitPageBottom(page);
       };
       page.el.insertBefore(sp, p.el);
       p.splitter = sp;
@@ -398,6 +413,17 @@ export class TerminalHost {
       const label = p.headEl.firstElementChild;
       if (label) label.textContent = `终端 ${p.no} · ${p.tag}`;
     });
+  }
+
+  /**
+   * 重排一页里的终端，并让每个都回到最底部。
+   * 改高度后行数变了，停在原来的滚动位置会露出去一截旧内容，看着像被上面那块挡住。
+   */
+  private fitPageBottom(page: Page) {
+    for (const p of page.panes) {
+      this.fitPane(p);
+      p.term.scrollToBottom();
+    }
   }
 
   /** 拖动上下两个终端之间的分隔条 */
@@ -434,7 +460,7 @@ export class TerminalHost {
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
         sp.classList.remove("dragging");
-        this.fitAll(); // 拖动过程中不 fit，松手才重排 PTY，避免反复触发 ConPTY 重绘
+        this.fitPageBottom(page); // 拖动过程中不 fit，松手才重排 PTY，避免反复触发 ConPTY 重绘
       };
       window.addEventListener("mousemove", move);
       window.addEventListener("mouseup", up);
@@ -458,6 +484,13 @@ export class TerminalHost {
   }
 
   /** 窗口或终端列尺寸变了：按比例重算高度 */
+  /** 整个上下文都不要了：把里面的终端和 PTY 一起收掉，别留在后台 */
+  dispose() {
+    for (const page of [...this.pages]) for (const p of [...page.panes]) this.killPane(p);
+    this.pages.length = 0;
+    this.activePage = -1;
+  }
+
   relayoutAll() {
     for (const page of this.pages) this.relayout(page);
   }

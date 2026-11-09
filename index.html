@@ -89,11 +89,11 @@
           <span>终端</span>
           <span class="spacer"></span>
           <button id="btn-shell" title="选择终端类型（PowerShell / cmd / WSL / Git Bash）">˅</button>
-          <button id="btn-new-term" title="当前页新建终端">＋</button>
+          <button id="btn-new-term" title="新建终端（新的一页）">＋</button>
+          <button id="btn-split-term" title="拆分终端（在当前页里再开一个，上下叠放）">⊟</button>
           <button id="btn-close-panel" title="收起终端栏">✕</button>
         </div>
-        <div id="term-tabs"></div>
-        <div id="terms"></div>
+        <div id="term-host"></div>
       </div>
 
       <div id="status">
@@ -103,6 +103,7 @@
         <span id="st-eol" title="换行符"></span>
         <span id="st-conn">本地</span>
         <span id="st-pos"></span>
+        <span id="st-term" title="打开/收起终端栏（Ctrl+`）">终端</span>
         <span id="st-fwd" title="点击停止全部端口转发"></span>
         <span id="st-bridge" title="Agent Bridge 端口">bridge :7317</span>
       </div>
