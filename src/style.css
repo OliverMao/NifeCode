@@ -123,6 +123,12 @@ body {
 }
 .set-row input[type="range"] { width: 150px; accent-color: var(--accent); }
 .set-row .num { width: 34px; text-align: right; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); }
+.set-row button.mini {
+  background: #3a3d41; color: #eee; border: 1px solid #555; border-radius: 2px;
+  padding: 3px 10px; font: inherit; cursor: pointer;
+}
+.set-row button.mini:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.set-row button.mini:disabled { opacity: .6; cursor: default; }
 .set-foot { margin-top: 14px; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); text-align: center; }
 
 #sidebar { background: var(--bg-side); display: flex; flex-direction: column; overflow: hidden; }

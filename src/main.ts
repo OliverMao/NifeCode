@@ -456,6 +456,14 @@ async function showSettings() {
   );
   rows.push(
     row(
+      "WebView 缓存",
+      "只删能自动重建的缓存（Code Cache / HTTP Cache / GPUCache 等），登录状态和配置不动",
+      `<span id="set-cache-size" style="color:var(--fg-dim);font-size:calc(var(--ui) - 2px)">…</span>
+       <button id="set-cache-clear" class="mini">清理</button>`
+    )
+  );
+  rows.push(
+    row(
       "崩溃后恢复未保存内容",
       "定时把没保存的编辑快照起来，下次启动问你要不要恢复",
       `<input id="set-snapshot" type="checkbox" ${settings.snapshot ? "checked" : ""} />`
@@ -504,6 +512,33 @@ async function showSettings() {
   on<HTMLInputElement>("set-snapshot")?.addEventListener("change", (e) => {
     settings.snapshot = (e.target as HTMLInputElement).checked;
     save("snapshot", settings.snapshot ? "1" : "0");
+  });
+
+  // 缓存：进设置时算一次大小，点清理后重算
+  const sizeEl = on<HTMLSpanElement>("set-cache-size");
+  const fmt = (b: number) => (b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+  const refreshCache = async () => {
+    const info = await invoke<{ bytes: number }>("app_cache_size").catch(() => null);
+    if (sizeEl) sizeEl.textContent = info ? fmt(info.bytes) : "算不出来";
+  };
+  void refreshCache();
+  on<HTMLButtonElement>("set-cache-clear")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = "清理中…";
+    try {
+      const freed = await invoke<number>("app_cache_clear");
+      setMsg(`已清理 ${fmt(freed)} 缓存`);
+      await refreshCache();
+      btn.textContent = "已清理";
+    } catch (err) {
+      setMsg(`清理失败：${err}`);
+      btn.textContent = "清理";
+    }
+    setTimeout(() => {
+      btn.disabled = false;
+      if (btn.textContent === "已清理") btn.textContent = "清理";
+    }, 1200);
   });
 
   await closed;
@@ -701,10 +736,6 @@ async function closeMany(paths: string[]) {
 /** 左上角主菜单（点 logo / 品牌名出来） */
 function mainMenu(): MenuItem[] {
   return [
-    { label: "打开文件夹…", run: () => $<HTMLButtonElement>("#btn-open-folder").click() },
-    { label: "SSH 连接", run: () => document.querySelector<HTMLButtonElement>('#activity button[data-act="ssh"]')?.click() },
-    { label: "命令面板…", run: () => void showCommandPalette() },
-    "sep",
     { label: "设置…", run: () => void showSettings() },
     { label: "关于 NifeCode", run: () => void showAbout() },
     "sep",

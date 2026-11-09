@@ -1,4 +1,5 @@
 mod bridge;
+mod cache;
 mod fsops;
 mod proc;
 mod session;
@@ -45,6 +46,8 @@ pub fn run() {
             fsops::list_files,
             fsops::replace_all,
             fsops::read_binary,
+            cache::app_cache_size,
+            cache::app_cache_clear,
             fsops::ssh_save_password,
             fsops::ssh_forget_password,
             fsops::ssh_has_password,
