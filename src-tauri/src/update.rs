@@ -40,24 +40,42 @@ fn api_url() -> String {
 }
 
 fn curl(url: &str, out: Option<&PathBuf>) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("curl");
-    cmd.args(["-sSL", "--max-time", "60", "-H", "User-Agent: NifeCode"]);
-    if let Some(p) = out {
-        cmd.arg("-o").arg(p);
-    }
-    cmd.arg(url);
-    let o = crate::proc::hide_console(&mut cmd)
-        .output()
-        .map_err(|e| format!("curl 启动失败: {e}"))?;
-    if !o.status.success() {
+    // GitHub 这边时不时 Reset / 连不上，重试三次 + curl 自己也重试一次，别让一次抖动就更新失败
+    let mut last = String::new();
+    for attempt in 0..3 {
+        let mut cmd = Command::new("curl");
+        cmd.args([
+            "-sSL",
+            "--max-time",
+            "120",
+            "--retry",
+            "1",
+            "--retry-delay",
+            "1",
+            "-H",
+            "User-Agent: NifeCode",
+        ]);
+        if let Some(p) = out {
+            cmd.arg("-o").arg(p);
+        }
+        cmd.arg(url);
+        let o = crate::proc::hide_console(&mut cmd)
+            .output()
+            .map_err(|e| format!("curl 启动失败: {e}"))?;
+        if o.status.success() {
+            return Ok(o.stdout);
+        }
         let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
-        return Err(if msg.is_empty() {
-            format!("请求失败 (HTTP {}", o.status.code().unwrap_or(-1))
+        last = if msg.is_empty() {
+            format!("请求失败 (HTTP {})", o.status.code().unwrap_or(-1))
         } else {
             msg
-        });
+        };
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
-    Ok(o.stdout)
+    Err(last)
 }
 
 /// "v0.1.10" vs "0.1.9" → 逐段按数字比
