@@ -400,7 +400,9 @@ scripts/           图标生成、CDP 截图与执行（make-icon.mjs 自绘图�
 
 ## 许可证
 
-**GNU 通用公共许可证第 3 版或更新版本（GPL-3.0-or-later）** —— 全文见 [LICENSE](LICENSE)。
+**GNU 通用公共许可证第 3 版或更新版本（GPL-3.0-or-later）** —— 全文见 [LICENSE](LICENSE)，版权声明见 [COPYRIGHT](COPYRIGHT)。
+
+> `LICENSE` 里是纯 GPL 正文（GitHub 靠它识别许可），版权/免责那几行单独放在 `COPYRIGHT`，两边内容不冲突。
 
 自己用、公司内部用、改、二次发行都可以；但**发行修改版必须同样开源**（含你改的那部分），不能拿去做闭源分支。要闭源商用得单独找我授权（版权在我手上，可以双许可）。
 

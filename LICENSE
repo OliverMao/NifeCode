@@ -1,16 +1,3 @@
-NifeCode — 轻量编辑器（Monaco + xterm + Tauri）
-Copyright (C) 2026 OliverMao
-
-本程序是自由软件：你可以再分发和/或修改它，条款是自由软件基金会发布的
-GNU 通用公共许可证第 3 版（或你选择的任何更新版本）。
-
-本程序按“现状”分发，不带任何担保，甚至不含适销性或特定用途适用性的默示担保。
-详见下面的 GNU 通用公共许可证正文。
-
-本程序的源代码：https://github.com/OliverMao/NifeCode
-
--------------------------------------------------------------------------------
-
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
