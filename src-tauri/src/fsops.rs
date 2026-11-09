@@ -505,3 +505,124 @@ pub async fn search(
         }
     }
 }
+
+// ---------- 文件操作（新建 / 重命名 / 删除 / 复制）----------
+
+/// 防手滑：不允许对空路径、根目录动手
+fn check_target(path: &str) -> Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() || p == "/" || p.len() == 2 && p.ends_with(':') {
+        return Err("不能对根目录执行这个操作".into());
+    }
+    Ok(())
+}
+
+fn remote_fail(out: &[u8]) -> Option<String> {
+    let msg = String::from_utf8_lossy(out).trim().to_string();
+    if msg.is_empty() { None } else { Some(msg) }
+}
+
+#[tauri::command]
+pub async fn fs_new(host: Option<String>, port: u16, path: String, dir: bool) -> Result<(), String> {
+    check_target(&path)?;
+    match host {
+        None => {
+            let p = std::path::Path::new(&path);
+            if p.exists() {
+                return Err("已经存在同名文件".into());
+            }
+            if dir {
+                std::fs::create_dir_all(p).map_err(|e| format!("{path}: {e}"))
+            } else {
+                if let Some(parent) = p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::File::create(p).map(|_| ()).map_err(|e| format!("{path}: {e}"))
+            }
+        }
+        Some(h) => {
+            let q = shq(&path);
+            let cmd = if dir {
+                format!("[ -e {q} ] && {{ echo 已经存在同名文件; exit 7; }}; mkdir -p {q}")
+            } else {
+                format!("[ -e {q} ] && {{ echo 已经存在同名文件; exit 7; }}; mkdir -p \"$(dirname {q})\" && : > {q}")
+            };
+            ssh_exec(&h, port, &cmd).map(|_| ()).map_err(|e| remote_fail(e.as_bytes()).unwrap_or(e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fs_rename(host: Option<String>, port: u16, from: String, to: String) -> Result<(), String> {
+    check_target(&from)?;
+    check_target(&to)?;
+    match host {
+        None => {
+            let dst = std::path::Path::new(&to);
+            if dst.exists() {
+                return Err("目标已存在".into());
+            }
+            std::fs::rename(&from, &to).map_err(|e| format!("{from} → {to}: {e}"))
+        }
+        Some(h) => {
+            let cmd = format!(
+                "[ -e {t} ] && {{ echo 目标已存在; exit 7; }}; mv -- {f} {t}",
+                f = shq(&from),
+                t = shq(&to)
+            );
+            ssh_exec(&h, port, &cmd).map(|_| ()).map_err(|e| remote_fail(e.as_bytes()).unwrap_or(e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fs_delete(host: Option<String>, port: u16, path: String) -> Result<(), String> {
+    check_target(&path)?;
+    match host {
+        None => {
+            let p = std::path::Path::new(&path);
+            let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+            r.map_err(|e| format!("{path}: {e}"))
+        }
+        Some(h) => {
+            let cmd = format!("rm -rf -- {}", shq(&path));
+            ssh_exec(&h, port, &cmd).map(|_| ()).map_err(|e| remote_fail(e.as_bytes()).unwrap_or(e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn fs_copy(host: Option<String>, port: u16, from: String, to: String) -> Result<(), String> {
+    check_target(&from)?;
+    check_target(&to)?;
+    match host {
+        None => {
+            let dst = std::path::Path::new(&to);
+            if dst.exists() {
+                return Err("目标已存在".into());
+            }
+            copy_recursive(std::path::Path::new(&from), dst).map_err(|e| format!("{from} → {to}: {e}"))
+        }
+        Some(h) => {
+            let cmd = format!(
+                "[ -e {t} ] && {{ echo 目标已存在; exit 7; }}; cp -r -- {f} {t}",
+                f = shq(&from),
+                t = shq(&to)
+            );
+            ssh_exec(&h, port, &cmd).map(|_| ()).map_err(|e| remote_fail(e.as_bytes()).unwrap_or(e))
+        }
+    }
+}
+
+fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            copy_recursive(&e.path(), &to.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}

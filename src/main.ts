@@ -312,18 +312,189 @@ function paintIcon(el: HTMLElement, name: string, isDir: boolean, path: string) 
   el.innerHTML = iconSvg(iconFor(name, isDir, expanded.has(path)));
 }
 
-async function renderTree(dir: string, container: HTMLElement, depth: number) {
+
+// ---------- 资源管理器：右键菜单 + 自动刷新 ----------
+type MenuItem = { label: string; run: () => void } | "sep";
+
+let clip: { path: string; host: string | null; port: number; cut: boolean } | null = null;
+
+function showMenu(x: number, y: number, items: MenuItem[]) {
+  const m = $("#ctxmenu");
+  m.innerHTML = "";
+  for (const it of items) {
+    if (it === "sep") {
+      const d = document.createElement("div");
+      d.className = "sep";
+      m.appendChild(d);
+      continue;
+    }
+    const el = document.createElement("div");
+    el.className = "mi";
+    el.textContent = it.label;
+    el.onmousedown = (ev) => { ev.preventDefault(); ev.stopPropagation(); hideMenu(); it.run(); };
+    m.appendChild(el);
+  }
+  m.classList.remove("hidden");
+  m.style.left = "0px";
+  m.style.top = "0px";
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 6))}px`;
+  m.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 6))}px`;
+}
+
+function hideMenu() {
+  $("#ctxmenu").classList.add("hidden");
+}
+
+function parentOf(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (i <= 0) return path;
+  return path.slice(0, i);
+}
+
+function joinPath(dir: string, name: string): string {
+  return `${dir.replace(/[\/]+$/, "")}/${name}`;
+}
+
+async function askText(title: string, label: string, value = ""): Promise<string | null> {
+  const r = await ask(title, `<label>${label}</label><input id="mt-name" value="${value.replace(/"/g, "&quot;")}" />`, [
+    { label: "确定", value: "ok", primary: true },
+    { label: "取消", value: "no" },
+  ]);
+  if (r !== "ok") return null;
+  const v = ($<HTMLInputElement>("#mt-name")).value.trim();
+  return v || null;
+}
+
+function treeMenu(e: Entry): MenuItem[] {
+  const dir = e.is_dir ? e.path : parentOf(e.path);
+  const items: MenuItem[] = [
+    { label: "新建文件", run: () => void newEntry(dir, false) },
+    { label: "新建文件夹", run: () => void newEntry(dir, true) },
+  ];
+  if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(dir) });
+  items.push("sep");
+  if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
+  items.push(
+    { label: "重命名", run: () => void renameEntry(e.path) },
+    { label: "删除", run: () => void deleteEntry(e.path) },
+    "sep",
+    { label: "复制", run: () => setClip(e.path, false) },
+    { label: "剪切", run: () => setClip(e.path, true) }
+  );
+  return items;
+}
+
+function setClip(path: string, cut: boolean) {
+  clip = { path, host, port, cut };
+  setMsg(`${cut ? "已剪切" : "已复制"} ${baseName(path)}`);
+}
+
+async function newEntry(dir: string, isDir: boolean) {
+  const name = await askText(isDir ? "新建文件夹" : "新建文件", "名称", isDir ? "新建文件夹" : "untitled.txt");
+  if (!name) return;
+  const path = joinPath(dir, name);
+  try {
+    await invoke("fs_new", { ...connArg(), path, dir: isDir });
+    if (isDir) expanded.add(dir);
+    await refreshTree();
+    setMsg(`已创建 ${path}`);
+    if (!isDir) void openFile(path);
+  } catch (err) {
+    setMsg(`新建失败：${err}`);
+  }
+}
+
+async function renameEntry(path: string) {
+  const name = await askText("重命名", "新名称", baseName(path));
+  if (!name || name === baseName(path)) return;
+  try {
+    await invoke("fs_rename", { ...connArg(), from: path, to: joinPath(parentOf(path), name) });
+    await refreshTree();
+    setMsg(`已重命名 ${baseName(path)} → ${name}`);
+  } catch (err) {
+    setMsg(`重命名失败：${err}`);
+  }
+}
+
+async function deleteEntry(path: string) {
+  const r = await ask("删除", `确定删除「${baseName(path)}」？<br/><span style="color:#e2c08d">远程目录会递归删除，不可恢复。</span>`, [
+    { label: "删除", value: "ok", primary: true },
+    { label: "取消", value: "no" },
+  ]);
+  if (r !== "ok") return;
+  try {
+    await invoke("fs_delete", { ...connArg(), path });
+    await refreshTree();
+    setMsg(`已删除 ${path}`);
+  } catch (err) {
+    setMsg(`删除失败：${err}`);
+  }
+}
+
+async function pasteInto(dir: string) {
+  if (!clip) return;
+  const to = joinPath(dir, baseName(clip.path));
+  if (to === clip.path) {
+    setMsg("目标就是原位置");
+    return;
+  }
+  try {
+    const cmd = clip.cut ? "fs_rename" : "fs_copy";
+    const args = clip.cut
+      ? { host: clip.host, port: clip.port, from: clip.path, to }
+      : { host: clip.host, port: clip.port, from: clip.path, to };
+    await invoke(cmd, args);
+    setMsg(`${clip.cut ? "已移动" : "已复制"}到 ${to}`);
+    if (clip.cut) clip = null;
+    await refreshTree();
+  } catch (err) {
+    setMsg(`粘贴失败：${err}`);
+  }
+}
+
+let treeSig = "";
+async function refreshTree() {
+  if (!root) return;
+  const active = document.querySelector<HTMLElement>(".node.active")?.dataset.path;
+  $("#tree").innerHTML = "";
+  await renderTree(root, $("#tree"), 0, true);
+  if (active) document.querySelector<HTMLElement>(`.node[data-path="${CSS.escape(active)}"]`)?.classList.add("active");
+  treeSig = "";
+}
+
+/** 只 stat 一次，变了就重画：本地 1.5s / 远端 5s 一次 */
+async function pollTree(reset = false) {
+  if (!root) return;
+  if (reset) treeSig = "";
+  const dirs = [root, ...expanded].slice(0, 40);
+  let mtimes: number[];
+  try {
+    mtimes = await invoke<number[]>("stat_files", { ...connArg(), paths: dirs });
+  } catch {
+    return;
+  }
+  const sig = mtimes.join(",");
+  if (!treeSig) {
+    treeSig = sig;
+    return;
+  }
+  if (sig !== treeSig) await refreshTree();
+}
+
+async function renderTree(dir: string, container: HTMLElement, depth: number, silent = false) {
   let entries: Entry[];
   try {
     entries = await invoke<Entry[]>("read_dir", { ...connArg(), path: dir });
   } catch (e) {
-    setMsg(`读取目录失败：${e}`);
+    if (!silent) setMsg(`读取目录失败：${e}`);
     return;
   }
   const wrap = document.createElement("div");
   for (const e of entries) {
     const row = document.createElement("div");
     row.className = "node";
+    row.dataset.path = e.path;
     row.style.paddingLeft = `${8 + depth * 12}px`;
     const ico = document.createElement("span");
     ico.className = "ico";
@@ -333,6 +504,16 @@ async function renderTree(dir: string, container: HTMLElement, depth: number) {
     name.textContent = e.name;
     row.append(ico, name);
     wrap.appendChild(row);
+
+    row.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!e.is_dir) {
+        document.querySelectorAll(".node.active").forEach((n) => n.classList.remove("active"));
+        row.classList.add("active");
+      }
+      showMenu(ev.clientX, ev.clientY, treeMenu(e));
+    };
 
     if (e.is_dir) {
       row.onclick = async () => {
@@ -347,7 +528,14 @@ async function renderTree(dir: string, container: HTMLElement, depth: number) {
           row.after(sub);
           await renderTree(e.path, sub, depth + 1);
         }
+        void pollTree(true);
       };
+      // 刷新后恢复展开状态
+      if (expanded.has(e.path)) {
+        const sub = document.createElement("div");
+        row.after(sub);
+        await renderTree(e.path, sub, depth + 1, true);
+      }
     } else {
       row.onclick = () => {
         document.querySelectorAll(".node.active").forEach((n) => n.classList.remove("active"));
@@ -884,6 +1072,19 @@ async function boot() {
     saveCtxs();
     setMsg(`已打开 ${dir}`);
   };
+  $("#tree").addEventListener("contextmenu", (ev) => {
+    const t = ev.target as HTMLElement;
+    if (t.closest(".node")) return; // 行上自己有菜单
+    if (!root) return;
+    ev.preventDefault();
+    const items: MenuItem[] = [
+      { label: "新建文件", run: () => void newEntry(root!, false) },
+      { label: "新建文件夹", run: () => void newEntry(root!, true) },
+    ];
+    if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(root!) });
+    showMenu(ev.clientX, ev.clientY, items);
+  });
+
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
     b.innerHTML = uiIcon(b.dataset.act ?? "");
   });
@@ -925,6 +1126,19 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     }
   };
 
+  $("#tree").addEventListener("contextmenu", (ev) => {
+    const t = ev.target as HTMLElement;
+    if (t.closest(".node")) return; // 行上自己有菜单
+    if (!root) return;
+    ev.preventDefault();
+    const items: MenuItem[] = [
+      { label: "新建文件", run: () => void newEntry(root!, false) },
+      { label: "新建文件夹", run: () => void newEntry(root!, true) },
+    ];
+    if (clip) items.push({ label: `粘贴「${baseName(clip.path)}」`, run: () => void pasteInto(root!) });
+    showMenu(ev.clientX, ev.clientY, items);
+  });
+
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
     b.onclick = () => {
       const act = b.dataset.act;
@@ -951,7 +1165,12 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     }
   });
 
+  document.addEventListener("mousedown", (e) => {
+    const t = e.target as HTMLElement | null;
+    if (!t || typeof t.closest !== "function" || !t.closest("#ctxmenu")) hideMenu();
+  });
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideMenu();
     if (e.key === "Escape") closeModal();
   });
 
@@ -976,6 +1195,11 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     void pollExternalChanges();
   }, host ? 10000 : 1200); // 远端一次轮询就是一次完整 ssh 往返，别太勤
   setInterval(() => { if ($("#scm").classList.contains("active")) void loadGit(); }, 4000);
+  // 文件树自动刷新：只 stat 根目录 + 已展开的目录，变了才重画
+  setInterval(() => {
+    if (document.hidden) return;
+    if (!$("#tree").classList.contains("hidden")) void pollTree();
+  }, host ? 5000 : 1500);
   setInterval(() => { void pushBridgeState(); }, 2000);
 
   if (!root) setMsg("就绪：点击左侧 ＋ 打开文件夹，或点 🔌 连接 SSH");

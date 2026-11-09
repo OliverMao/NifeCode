@@ -269,3 +269,15 @@ body {
 }
 #modal button.secondary { background: #3a3d41; }
 #modal button:hover { filter: brightness(1.15); }
+
+/* ---------- 右键菜单 ---------- */
+#ctxmenu {
+  position: fixed; z-index: 3000; min-width: 160px;
+  background: #252526; border: 1px solid #454545; border-radius: 4px;
+  padding: 4px 0; box-shadow: 0 4px 18px rgba(0, 0, 0, .55); font-size: 12px;
+  user-select: none;
+}
+#ctxmenu.hidden { display: none; }
+#ctxmenu .mi { padding: 5px 14px; cursor: pointer; color: #cccccc; white-space: nowrap; }
+#ctxmenu .mi:hover { background: var(--accent); color: #fff; }
+#ctxmenu .sep { height: 1px; background: #3c3c3c; margin: 4px 0; }
