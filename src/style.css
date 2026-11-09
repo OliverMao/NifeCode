@@ -11,6 +11,7 @@
   --status: #452760;
   --hover: #2a2d2e;
   --sel: #094771;
+  --ui: 13px;   /* 界面字号，Ctrl+= / Ctrl+- 时和编辑器一起变 */
 }
 
 * { box-sizing: border-box; }
@@ -47,7 +48,7 @@ body {
 #ctx-tabs::-webkit-scrollbar { height: 0; }
 .ctx-tab {
   display: flex; align-items: center; gap: 6px; padding: 0 12px;
-  font-size: 12px; color: #9d9d9d; cursor: pointer;
+  font-size: calc(var(--ui) - 1px); color: #9d9d9d; cursor: pointer;
   border-right: 1px solid var(--border); white-space: nowrap;
 }
 .ctx-tab:hover { background: #2a2d2e; }
@@ -74,7 +75,7 @@ body {
 #sidebar.hidden, #sidebar.collapsed { display: none; }
 .head {
   display: flex; align-items: center; gap: 6px; padding: 6px 10px;
-  font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--fg-dim);
+  font-size: calc(var(--ui) - 2px); text-transform: uppercase; letter-spacing: .5px; color: var(--fg-dim);
   flex: 0 0 auto;
 }
 .head .spacer { flex: 1; }
@@ -98,7 +99,7 @@ body {
 .ssh-head button { background: transparent; border: 0; color: var(--fg-dim); cursor: pointer; font-size: 13px; }
 .ssh-head button:hover { color: #fff; }
 #ssh-list { flex: 1; overflow: auto; }
-.ssh-row { display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer; font-size: 12.5px; }
+.ssh-row { display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer; font-size: calc(var(--ui) - 1px); }
 .ssh-row:hover { background: var(--hover); }
 .ssh-row.active { background: var(--sel); }
 .ssh-row .nm { flex: 0 0 auto; }
@@ -119,8 +120,8 @@ body {
 #search-list { flex: 1; overflow: auto; }
 .sr-row { padding: 3px 10px; cursor: pointer; border-bottom: 1px solid #1f1f1f; }
 .sr-row:hover { background: var(--hover); }
-.sr-file { display: block; font-size: 11.5px; color: #4daafc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sr-text { display: block; font-size: 12px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-file { display: block; font-size: calc(var(--ui) - 1.5px); color: #4daafc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-text { display: block; font-size: calc(var(--ui) - 1px); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sr-count { padding: 6px 10px; font-size: 11px; color: var(--fg-dim); }
 
 /* ---------- 源代码管理 ---------- */
@@ -134,7 +135,7 @@ body {
 .scm-head button { background: transparent; border: 0; color: var(--fg-dim); cursor: pointer; font-size: 13px; }
 .scm-head button:hover { color: #fff; }
 #scm-list { flex: 1; overflow: auto; }
-.scm-row { display: flex; align-items: center; gap: 6px; padding: 3px 10px; cursor: pointer; font-size: 12.5px; }
+.scm-row { display: flex; align-items: center; gap: 6px; padding: 3px 10px; cursor: pointer; font-size: calc(var(--ui) - 1px); }
 .scm-row:hover { background: var(--hover); }
 .scm-row .st { width: 13px; text-align: center; font-weight: 600; color: var(--fg-dim); }
 .scm-row .st.M { color: #e2c08d; }
@@ -156,12 +157,12 @@ body {
 .scm-commit button:hover { filter: brightness(1.15); }
 .node {
   display: flex; align-items: center; gap: 4px; padding: 2px 8px; cursor: pointer;
-  white-space: nowrap; font-size: 13px;
+  white-space: nowrap; font-size: var(--ui);
 }
 .node:hover { background: var(--hover); }
 .node.active { background: var(--sel); }
-.node .ico { width: 16px; height: 16px; flex: none; display: flex; align-items: center; justify-content: center; }
-.node .ico svg { display: block; }
+.node .ico { width: calc(var(--ui) + 3px); height: calc(var(--ui) + 3px); flex: none; display: flex; align-items: center; justify-content: center; }
+.node .ico svg { display: block; width: calc(var(--ui) + 2px); height: calc(var(--ui) + 2px); }
 .node .name { overflow: hidden; text-overflow: ellipsis; }
 .node .badge { margin-left: auto; font-size: 10px; color: #e2c08d; }
 
@@ -171,6 +172,7 @@ body {
 .tab {
   display: flex; align-items: center; gap: 6px; padding: 0 12px; cursor: pointer;
   border-right: 1px solid var(--border); color: #969696; max-width: 240px; white-space: nowrap;
+  font-size: var(--ui);
 }
 .tab.active { background: var(--bg-tab-active); color: #fff; border-top: 1px solid var(--accent); }
 .tab .x { opacity: .6; font-size: 12px; }
@@ -201,7 +203,7 @@ body {
 #term-tabs:empty { display: none; }
 .ttab {
   display: flex; align-items: center; gap: 6px; padding: 0 10px; cursor: pointer;
-  border-right: 1px solid var(--border); color: #969696; font-size: 12px; white-space: nowrap;
+  border-right: 1px solid var(--border); color: #969696; font-size: calc(var(--ui) - 1px); white-space: nowrap;
 }
 .ttab.active { background: var(--bg-tab-active); color: #fff; border-top: 1px solid var(--accent); }
 .ttab .x { opacity: .6; font-size: 11px; }
@@ -228,7 +230,7 @@ body {
 .term-pane:first-child { border-top: 0; }
 .term-pane.active .pane-head { background: #2a2d2e; color: #e7e7e7; }
 .pane-head {
-  display: flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 11px;
+  display: flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: calc(var(--ui) - 2px);
   color: #8c8c8c; background: #252526; flex: 0 0 auto; cursor: pointer;
 }
 .pane-head .spacer { flex: 1; }
@@ -241,7 +243,7 @@ body {
 
 #status {
   grid-row: 3; grid-column: 1 / 5; background: var(--status); color: #fff; display: flex; align-items: center;
-  gap: 14px; padding: 0 10px; font-size: 12px;
+  gap: 14px; padding: 0 10px; font-size: calc(var(--ui) - 1px);
 }
 #status .spacer { flex: 1; }
 #st-msg { color: #e6f3ff; }
@@ -277,7 +279,7 @@ body {
 #ctxmenu {
   position: fixed; z-index: 3000; min-width: 160px;
   background: #252526; border: 1px solid #454545; border-radius: 4px;
-  padding: 4px 0; box-shadow: 0 4px 18px rgba(0, 0, 0, .55); font-size: 12px;
+  padding: 4px 0; box-shadow: 0 4px 18px rgba(0, 0, 0, .55); font-size: calc(var(--ui) - 1px);
   user-select: none;
 }
 #ctxmenu.hidden { display: none; }

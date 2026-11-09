@@ -214,6 +214,8 @@ let fontSize = Number(localStorage.getItem(FONT_KEY)) || FONT_DEFAULT;
 function applyFontSize(px: number) {
   fontSize = Math.max(9, Math.min(28, Math.round(px)));
   localStorage.setItem(FONT_KEY, String(fontSize));
+  // 界面字号也跟着变：文件树、标签、状态栏、面板一起缩放
+  document.documentElement.style.setProperty("--ui", `${fontSize}px`);
   editor.setFontSize(fontSize);
   terms.setFontSize(fontSize);
   setMsg(`字号 ${fontSize}px`);
