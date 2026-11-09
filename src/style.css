@@ -224,7 +224,7 @@ body {
 #app.no-term { grid-template-columns: 48px 260px 1fr; }
 
 #term-splitter, #side-splitter {
-  position: absolute; left: -3px; top: 0; bottom: 0; width: 6px;
+  position: absolute; left: -5px; top: 0; bottom: 0; width: 10px;
   cursor: col-resize; z-index: 20;
 }
 #term-splitter:hover, #side-splitter:hover { background: var(--accent); opacity: .5; }
@@ -254,10 +254,17 @@ body {
 }
 .ttab-add:hover { background: var(--hover); color: #fff; }
 
+/* 上下终端之间的分隔条：8px 好抓，中间一根可见的把手，别让人找不着 */
 .term-splitter-h {
-  flex: 0 0 4px; cursor: row-resize; background: var(--border);
+  flex: 0 0 8px; cursor: row-resize; background: #252526; position: relative;
+  display: flex; align-items: center; justify-content: center;
 }
-.term-splitter-h:hover { background: var(--accent); opacity: .6; }
+.term-splitter-h > i {
+  display: block; width: 42px; height: 2px; border-radius: 1px; background: #5a5a5a;
+  transition: background .12s, width .12s;
+}
+.term-splitter-h:hover > i, .term-splitter-h.dragging > i { background: #4daafc; width: 64px; }
+.term-splitter-h:hover { background: #2f3233; }
 
 .term-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: clip; border-top: 1px solid #333; position: relative; }
 .term-pane:first-child { border-top: 0; }
@@ -302,6 +309,18 @@ body {
 #st-msg { color: #e6f3ff; }
 #st-bridge { opacity: .8; }
 #st-fwd { cursor: pointer; }
+#st-about { cursor: pointer; opacity: .85; }
+#st-about:hover { opacity: 1; text-decoration: underline; }
+
+/* 关于弹窗（照 macOS 的样子：图标居中、名字、版本、分隔线、链接） */
+.about { text-align: center; padding: 6px 8px 18px; min-width: 300px; }
+.about .logo { display: flex; justify-content: center; margin: 4px 0 12px; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .55)); }
+.about .name { font-size: calc(var(--ui) + 7px); font-weight: 600; color: #f0ecf8; letter-spacing: .3px; }
+.about .ver { margin-top: 3px; color: #9d9d9d; font-size: calc(var(--ui) - 1px); }
+.about .desc { margin-top: 14px; color: #8a8a8a; font-size: calc(var(--ui) - 1.5px); line-height: 1.7; }
+.about .hp { border-top: 1px solid #3c3c3c; margin: 16px 12px 10px; }
+.about a { color: #4daafc; font-size: calc(var(--ui) - 1.5px); cursor: pointer; text-decoration: none; }
+.about a:hover { text-decoration: underline; }
 #st-fwd:empty { display: none; }
 
 #modal.hidden { display: none; }

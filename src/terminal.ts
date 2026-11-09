@@ -29,6 +29,7 @@ interface Pane {
   cols: number;   // 上一次下发给 PTY 的尺寸，用来去重
   rows: number;
   rt?: number;    // resize 去抖定时器
+  ratio?: number; // 占本页可用高度的比例（拖动分隔条时写，窗口缩放后按它还原）
 }
 
 /** 一页 = 一组互相独立的终端；页之间切换，页内可以堆叠多个 */
@@ -73,7 +74,10 @@ export class TerminalHost {
     let t = 0;
     window.addEventListener("resize", () => {
       window.clearTimeout(t);
-      t = window.setTimeout(() => this.fitAll(), 120);
+      t = window.setTimeout(() => {
+        this.relayoutAll();
+        this.fitAll();
+      }, 120);
     });
   }
 
@@ -372,6 +376,13 @@ export class TerminalHost {
       if (i === 0) return;
       const sp = document.createElement("div");
       sp.className = "term-splitter-h";
+      sp.title = "拖动调整高度（双击恢复均分）";
+      sp.innerHTML = `<i></i>`;
+      sp.ondblclick = () => {
+        for (const x of page.panes) x.ratio = 1 / page.panes.length;
+        this.relayout(page);
+        this.fitAll();
+      };
       page.el.insertBefore(sp, p.el);
       p.splitter = sp;
       this.wireVSplitter(sp, page.panes[i - 1], page);
@@ -396,16 +407,31 @@ export class TerminalHost {
       const startH = above.el.getBoundingClientRect().height;
       const belowCount = page.panes.length - page.panes.indexOf(above) - 1;
       const total = above.el.parentElement!.getBoundingClientRect().height;
-      const max = total - 60 * belowCount; // 下面每个终端至少留 60px
+      const gap = (page.panes.length - 1) * 8; // 分隔条占掉的高度
+      const avail = Math.max(120, total - gap);
+      const max = avail - 60 * belowCount; // 下面每个终端至少留 60px
       document.body.style.cursor = "row-resize";
+      document.body.style.userSelect = "none"; // 否则拖的时候会把终端文字选中
+      sp.classList.add("dragging");
       const move = (e: MouseEvent) => {
         const h = Math.max(60, Math.min(max, startH + (e.clientY - startY)));
         above.el.style.flex = `0 0 ${Math.round(h)}px`;
+        above.ratio = h / avail;
+        // 下面的终端重新按剩余空间均分，别留着旧像素高度把最后一块挤没
+        const rest = page.panes.slice(page.panes.indexOf(above) + 1);
+        const left = Math.max(60, avail - h) / rest.length;
+        for (const r of rest) {
+          r.ratio = left / avail;
+          r.el.style.flex = `0 0 ${Math.round(left)}px`;
+        }
+        rest[rest.length - 1].el.style.flex = "1 1 0";
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
         window.removeEventListener("mouseup", up);
         document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        sp.classList.remove("dragging");
         this.fitAll(); // 拖动过程中不 fit，松手才重排 PTY，避免反复触发 ConPTY 重绘
       };
       window.addEventListener("mousemove", move);
@@ -415,12 +441,23 @@ export class TerminalHost {
 
   /** 关掉终端后重排：最后一个撑满，其余保持像素高度 */
   private relayout(page: Page) {
+    const n = page.panes.length;
+    if (!n) return;
+    const gap = (n - 1) * 8;
+    const avail = Math.max(120, page.el.getBoundingClientRect().height - gap);
     page.panes.forEach((p, i) => {
-      if (i === page.panes.length - 1) p.el.style.flex = "1 1 0";
-      else if (!p.el.style.flex.startsWith("0 0")) {
-        p.el.style.flex = `0 0 ${Math.round(p.el.getBoundingClientRect().height)}px`;
+      if (i === n - 1) {
+        p.el.style.flex = "1 1 0"; // 最后一个吃掉剩下的，避免误差累积成滚动条
+        return;
       }
+      if (p.ratio === undefined) p.ratio = 1 / n;
+      p.el.style.flex = `0 0 ${Math.max(60, Math.round(p.ratio * avail))}px`;
     });
+  }
+
+  /** 窗口或终端列尺寸变了：按比例重算高度 */
+  relayoutAll() {
+    for (const page of this.pages) this.relayout(page);
   }
 
   /** 所有页里的终端总数 */

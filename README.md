@@ -14,6 +14,7 @@ Windows 下 release 版常驻内存实测：**175MB**（编辑器 + 文件树 + 
 - **换行符默认 LF**：文件里本来没 CR 就用 LF，新建文件、新敲的回车都是 LF（跟 Linux/远端一致）；打开本来就是 CRLF 的文件保持 CRLF，状态栏显示 `LF` / `CRLF`
 - **关窗不丢改动**：右上角 ✕ 时如果有没保存的文件，会列出文件名让你选「全部保存并关闭 / 不保存 / 取消」
 - **`Ctrl+P` 快速打开**：全项目文件名模糊匹配（`src/ed` 这种片段也行），上下键选、回车打开；远端机器用一条 `find` 拿清单，结果缓存在内存里，文件树一变就失效重取
+- **关于**：点右下角状态栏「关于」弹出 macOS 风格的版本窗（图标 / 名称 / 版本号 / 仓库地址，点地址复制），版本号取自 `tauri.conf.json`
 - 标签页 + 未保存标记（`●`）；**标签右键菜单**：关闭 / 关闭其他 / 关闭右侧 / 关闭已保存 / 全部关闭 / 复制路径 / 复制相对路径 / 在资源管理器中显示；鼠标**中键**点标签直接关掉。关掉当前标签会自动切到邻居，不会留一个空编辑器
 - 左侧活动栏、文件图标、状态全用**自绘 SVG**（`src/icons.ts`），不用 emoji、不引图标字体
 - **资源管理器会自己刷新**：只 stat 当前根目录 + 已展开的目录，变了才重画（本地 1.5s / 远端 5s 一次），展开状态保留
@@ -68,12 +69,12 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 | 产物 | 路径 | 说明 |
 |---|---|---|
 | 免安装单文件 | `src-tauri/target/release/nifecode.exe` | 双击就跑，不写注册表、不进开始菜单，放哪都行 |
-| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.0_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
+| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.1_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
 
 两个都**不需要额外文件**（前端已内嵌进 exe）。免安装版就是那个普通 release 二进制，改个名而已：
 
 ```bash
-cp src-tauri/target/release/nifecode.exe NifeCode_0.1.0_x64_portable.exe
+cp src-tauri/target/release/nifecode.exe NifeCode_0.1.1_x64_portable.exe
 ```
 
 ## 应用图标

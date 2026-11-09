@@ -3,6 +3,7 @@ import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
 import { TerminalHost } from "./terminal";
@@ -293,6 +294,30 @@ function ask(title: string, bodyHTML: string, buttons: Btn[]): Promise<string> {
   });
 }
 function closeModal() { $("#modal").classList.add("hidden"); }
+
+// ---------- 关于 ----------
+const ABOUT_LOGO = `<svg width="104" height="104" viewBox="0 0 32 32" aria-hidden="true">
+  <rect x="5" y="5" width="22" height="22" fill="#452760"/>
+  <rect x="11" y="10" width="4" height="12" fill="#f0ecf8"/>
+</svg>`;
+
+async function showAbout() {
+  const v = await getVersion().catch(() => "");
+  await ask(
+    "关于",
+    `<div class="about">
+      <div class="logo">${ABOUT_LOGO}</div>
+      <div class="name">NifeCode</div>
+      <div class="ver">版本 ${v || "开发版"}</div>
+      <div class="desc">轻量编辑器 · Monaco + xterm + Tauri<br/>SSH 远端开发 · 多标签工作区 · Agent Bridge</div>
+      <div class="hp"></div>
+      <a id="about-repo" title="点击复制仓库地址">github.com/OliverMao/NifeCode</a>
+    </div>`,
+    [{ label: "好", value: "ok", primary: true }]
+  );
+  const a = document.getElementById("about-repo");
+  if (a) a.onclick = () => copyText("https://github.com/OliverMao/NifeCode");
+}
 
 // ---------- 未保存内容快照（崩溃/断电后还能捞回来） ----------
 const DIRTY_KEY = "dirty-buffers";
@@ -1723,6 +1748,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
+  $<HTMLSpanElement>("#st-about").onclick = () => void showAbout();
 
   // 关窗前把没保存的改动问一遍，别直接丢
   await getCurrentWindow().onCloseRequested(async (ev) => {
@@ -1941,7 +1967,7 @@ async function showCommandPalette() {
     "命令面板",
     `<input id="pal-input" placeholder="输入命令…" />
      <div id="pal-list" style="margin-top:8px;font-size:12px;color:#9d9d9d;line-height:1.8">
-       1. 打开文件夹<br/>2. SSH 连接<br/>3. 断开 SSH<br/>4. 新建终端<br/>5. 保存当前文件<br/>6. 端口转发
+       1. 打开文件夹<br/>2. SSH 连接<br/>3. 断开 SSH<br/>4. 新建终端<br/>5. 保存当前文件<br/>6. 端口转发<br/>7. 关于
      </div>`,
     [{ label: "取消", value: "cancel" }]
   );
@@ -1957,6 +1983,7 @@ async function showCommandPalette() {
     else if (v.includes("终端") || v.includes("term")) { showTerm(true); void terms.newTerminal(); }
     else if (v.includes("保存") || v.includes("save")) void saveCurrent();
     else if (v.includes("转发") || v.includes("forward")) void addForward();
+    else if (v.includes("关于") || v.includes("about") || v.includes("版本")) void showAbout();
   });
 }
 
