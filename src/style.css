@@ -216,7 +216,7 @@ body {
 #terms { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: clip; }
 
 /* 一页 = 一组终端，页之间切换 */
-.term-page { display: none; flex: 1 1 0; min-height: 0; flex-direction: column; overflow: hidden; }
+.term-page { display: none; flex: 1 1 0; min-height: 0; flex-direction: column; overflow: clip; }
 .term-page.active { display: flex; }
 
 .ttab-add {
@@ -230,7 +230,7 @@ body {
 }
 .term-splitter-h:hover { background: var(--accent); opacity: .6; }
 
-.term-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid #333; }
+.term-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: clip; border-top: 1px solid #333; }
 .term-pane:first-child { border-top: 0; }
 .term-pane.active .pane-head { background: #2a2d2e; color: #e7e7e7; }
 .pane-head {
@@ -241,7 +241,9 @@ body {
 .pane-head .x { cursor: pointer; opacity: .7; padding: 0 4px; display: inline-flex; align-items: center; }
 .pane-head .x svg { display: block; width: 11px; height: 11px; }
 .pane-head .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
-.term-body { flex: 1; min-height: 0; overflow: hidden; padding: 2px 0 0 8px; }
+/* overflow: clip（不是 hidden）——hidden 还是可滚动的容器，中文输入法的组合文字一长就会把
+   终端整块滚偏 55px，看着就是闪一下。clip 根本不能滚，从根上没了这个问题。 */
+.term-body { flex: 1; min-height: 0; overflow: clip; padding: 2px 0 0 8px; }
 /* 终端里的滚动条不占宽度：不然中文宽字符一进来、滚动条一出现，列数就变，整个界面抖 */
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }

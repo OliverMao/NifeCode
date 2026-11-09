@@ -222,6 +222,10 @@ pub fn pty_open(
 
 #[tauri::command]
 pub fn pty_write(st: State<PtyState>, id: u32, data: String) -> Result<(), String> {
+    // 排查输入法/输入时序用：NIFECODE_PTY_DEBUG=1 时把每次写入打出来
+    if std::env::var_os("NIFECODE_PTY_DEBUG").is_some() {
+        eprintln!("[pty] write {id} {:?}", data);
+    }
     let guard = st.sessions.lock().unwrap();
     let sess = guard.get(&id).ok_or("终端不存在")?;
     let mut w = sess.writer.lock().unwrap();
