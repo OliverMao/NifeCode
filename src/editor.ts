@@ -126,6 +126,14 @@ export class EditorHost {
     if (encoding) d.encoding = encoding;
   }
 
+  setMinimap(on: boolean) {
+    this.ed.updateOptions({ minimap: { enabled: on } });
+  }
+
+  setWordWrap(on: boolean) {
+    this.ed.updateOptions({ wordWrap: on ? "on" : "off" });
+  }
+
   setFontSize(px: number) {
     this.ed.updateOptions({ fontSize: px, lineHeight: Math.round(px * 1.5) });
   }

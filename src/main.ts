@@ -339,6 +339,7 @@ function snapshotDirty() {
 }
 
 async function restoreDirty() {
+  if (!settings.snapshot) return;
   const raw = localStorage.getItem(DIRTY_KEY);
   if (!raw) return;
   localStorage.removeItem(DIRTY_KEY); // 只恢复一次
@@ -370,6 +371,145 @@ async function restoreDirty() {
 }
 
 // ---------- 编辑器 ----------
+// ---------- 设置 ----------
+interface Settings {
+  minimap: boolean;
+  wordWrap: boolean;
+  eol: "lf" | "crlf";
+  shell: string;
+  confirmClose: boolean;
+  snapshot: boolean;
+}
+const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, eol: "lf", shell: "", confirmClose: true, snapshot: true };
+
+function loadSettings(): Settings {
+  const b = (k: string, d: boolean) => (localStorage.getItem(k) === null ? d : localStorage.getItem(k) === "1");
+  return {
+    minimap: b("minimap", SET_DEFAULTS.minimap),
+    wordWrap: b("editor-wrap", SET_DEFAULTS.wordWrap),
+    eol: (localStorage.getItem("eol") as "lf" | "crlf") || SET_DEFAULTS.eol,
+    shell: localStorage.getItem("term-shell") ?? SET_DEFAULTS.shell,
+    confirmClose: b("confirm-close", SET_DEFAULTS.confirmClose),
+    snapshot: b("snapshot", SET_DEFAULTS.snapshot),
+  };
+}
+const settings = loadSettings();
+
+function applyEditorSettings() {
+  editor.setMinimap(settings.minimap);
+  editor.setWordWrap(settings.wordWrap);
+}
+
+async function showSettings() {
+  const shells = shellList.length ? shellList : await loadShells();
+  const rows: string[] = [];
+  const row = (k: string, hint: string, v: string) =>
+    `<div class="set-row"><div class="k"><b>${k}</b><span>${hint}</span></div><div class="v">${v}</div></div>`;
+
+  rows.push(
+    row(
+      "界面字号",
+      "编辑器、终端、文件树、状态栏一起缩放（也能用 Ctrl+= / Ctrl+-）",
+      `<input id="set-font" type="range" min="9" max="28" value="${fontSize}" /><span class="num" id="set-font-num">${fontSize}</span>`
+    )
+  );
+  rows.push(
+    row(
+      "编辑器 minimap",
+      "右侧的代码缩略图，关掉能省一点内存",
+      `<input id="set-minimap" type="checkbox" ${settings.minimap ? "checked" : ""} />`
+    )
+  );
+  rows.push(
+    row(
+      "自动换行",
+      "长行按窗口宽度折行，不用横向滚动",
+      `<input id="set-wrap" type="checkbox" ${settings.wordWrap ? "checked" : ""} />`
+    )
+  );
+  rows.push(
+    row(
+      "默认换行符",
+      "文件本来没有 CR 时用它（有 CRLF 的文件不会被改）",
+      `<select id="set-eol">
+         <option value="lf" ${settings.eol === "lf" ? "selected" : ""}>LF（Linux / 远端）</option>
+         <option value="crlf" ${settings.eol === "crlf" ? "selected" : ""}>CRLF（Windows）</option>
+       </select>`
+    )
+  );
+  rows.push(
+    row(
+      "默认终端",
+      "新建终端用哪个 shell（远端连接时忽略）",
+      `<select id="set-shell">
+         <option value="">跟随上次选择</option>
+         ${shells.map((sh) => `<option value="${sh.id}" ${settings.shell === sh.id ? "selected" : ""}>${sh.name}</option>`).join("")}
+       </select>`
+    )
+  );
+  rows.push(
+    row(
+      "关窗时确认未保存",
+      "有没保存的文件时，关窗口先问你",
+      `<input id="set-confirm" type="checkbox" ${settings.confirmClose ? "checked" : ""} />`
+    )
+  );
+  rows.push(
+    row(
+      "崩溃后恢复未保存内容",
+      "定时把没保存的编辑快照起来，下次启动问你要不要恢复",
+      `<input id="set-snapshot" type="checkbox" ${settings.snapshot ? "checked" : ""} />`
+    )
+  );
+
+  // ask() 一调用就把 DOM 画好了；这里先不 await，先把事件挂上再等关闭
+  $("#modal").classList.add("wide");
+  const closed = ask("设置", `<div class="set">${rows.join("")}<div class="set-foot">改动立即生效，存在本机</div></div>`, [
+    { label: "关闭", value: "ok", primary: true },
+  ]);
+
+  const on = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
+  const save = (k: string, v: string) => localStorage.setItem(k, v);
+
+  const font = on<HTMLInputElement>("set-font");
+  font?.addEventListener("input", () => {
+    applyFontSize(Number(font.value));
+    const n = on<HTMLSpanElement>("set-font-num");
+    if (n) n.textContent = String(fontSize);
+  });
+
+  on<HTMLInputElement>("set-minimap")?.addEventListener("change", (e) => {
+    settings.minimap = (e.target as HTMLInputElement).checked;
+    save("minimap", settings.minimap ? "1" : "0");
+    editor.setMinimap(settings.minimap);
+  });
+  on<HTMLInputElement>("set-wrap")?.addEventListener("change", (e) => {
+    settings.wordWrap = (e.target as HTMLInputElement).checked;
+    save("editor-wrap", settings.wordWrap ? "1" : "0");
+    editor.setWordWrap(settings.wordWrap);
+  });
+  on<HTMLSelectElement>("set-eol")?.addEventListener("change", (e) => {
+    settings.eol = (e.target as HTMLSelectElement).value as "lf" | "crlf";
+    save("eol", settings.eol);
+  });
+  on<HTMLSelectElement>("set-shell")?.addEventListener("change", (e) => {
+    settings.shell = (e.target as HTMLSelectElement).value;
+    preferredShell = settings.shell;
+    save(SHELL_KEY, settings.shell);
+  });
+  on<HTMLInputElement>("set-confirm")?.addEventListener("change", (e) => {
+    settings.confirmClose = (e.target as HTMLInputElement).checked;
+    save("confirm-close", settings.confirmClose ? "1" : "0");
+  });
+  on<HTMLInputElement>("set-snapshot")?.addEventListener("change", (e) => {
+    settings.snapshot = (e.target as HTMLInputElement).checked;
+    save("snapshot", settings.snapshot ? "1" : "0");
+  });
+
+  await closed;
+  $("#modal").classList.remove("wide");
+}
+
 // ---------- 字号缩放（Ctrl+= / Ctrl+- / Ctrl+0）----------
 const FONT_KEY = "font-size";
 const FONT_DEFAULT = 13;
@@ -556,6 +696,20 @@ async function closeMany(paths: string[]) {
     await closeTab(p);
     if (editor.docsFor(p)) return; // 还开着 = 用户点了取消
   }
+}
+
+/** 左上角主菜单（点 logo / 品牌名出来） */
+function mainMenu(): MenuItem[] {
+  return [
+    { label: "打开文件夹…", run: () => $<HTMLButtonElement>("#btn-open-folder").click() },
+    { label: "SSH 连接", run: () => document.querySelector<HTMLButtonElement>('#activity button[data-act="ssh"]')?.click() },
+    { label: "命令面板…", run: () => void showCommandPalette() },
+    "sep",
+    { label: "设置…", run: () => void showSettings() },
+    { label: "关于 NifeCode", run: () => void showAbout() },
+    "sep",
+    { label: "退出", run: () => void getCurrentWindow().close() },
+  ];
 }
 
 /** 标签右键菜单 */
@@ -763,6 +917,7 @@ function showMenu(x: number, y: number, items: MenuItem[]) {
 }
 
 function hideMenu() {
+  $("#brand").classList.remove("open");
   $("#ctxmenu").classList.add("hidden");
 }
 
@@ -1658,6 +1813,7 @@ async function boot() {
   renderCtxBar();
   if (root) void renderTree(root, $("#tree"), 0);
   applyFontSize(fontSize);
+  applyEditorSettings();
   void loadShells();
   if (terms.count() === 0) void terms.newPage(true);
 
@@ -1772,12 +1928,22 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
-  $<HTMLSpanElement>("#st-about").onclick = () => void showAbout();
+  $<HTMLButtonElement>("#brand").onclick = (ev) => {
+    ev.stopPropagation();
+    const r = $<HTMLButtonElement>("#brand").getBoundingClientRect();
+    $("#brand").classList.add("open");
+    showMenu(r.left, r.bottom + 2, mainMenu());
+  };
 
   // 关窗前把没保存的改动问一遍，别直接丢
   await getCurrentWindow().onCloseRequested(async (ev) => {
     const dirty = editor.dirtyPaths();
     if (!dirty.length) return;
+    if (!settings.confirmClose) {
+      ev.preventDefault();
+      await getCurrentWindow().destroy();
+      return;
+    }
     ev.preventDefault();
     const names = dirty.map(baseName).join("、");
     const r = await ask("未保存的更改", `这些文件还没保存：${names}`, [
@@ -1855,7 +2021,7 @@ async function openDiff(path: string, oldText: string, newText: string, opts: { 
   bar.innerHTML = `<span style="flex:1">${opts.title ?? "Agent 修改提案"}：${baseName(path)}</span>`;
   const ok = document.createElement("button");
   ok.textContent = "应用";
-  ok.style.cssText = "background:#0e639c;color:#fff;border:0;padding:5px 12px;border-radius:2px;cursor:pointer;";
+  ok.style.cssText = "background:#6d4a94;color:#fff;border:0;padding:5px 12px;border-radius:2px;cursor:pointer;";
   const no = document.createElement("button");
   no.textContent = "取消";
   no.style.cssText = "background:#3a3d41;color:#fff;border:0;padding:5px 12px;border-radius:2px;cursor:pointer;";
@@ -1991,7 +2157,7 @@ async function showCommandPalette() {
     "命令面板",
     `<input id="pal-input" placeholder="输入命令…" />
      <div id="pal-list" style="margin-top:8px;font-size:12px;color:#9d9d9d;line-height:1.8">
-       1. 打开文件夹<br/>2. SSH 连接<br/>3. 断开 SSH<br/>4. 新建终端<br/>5. 保存当前文件<br/>6. 端口转发<br/>7. 关于
+       1. 打开文件夹<br/>2. SSH 连接<br/>3. 断开 SSH<br/>4. 新建终端<br/>5. 保存当前文件<br/>6. 端口转发<br/>7. 设置<br/>8. 关于
      </div>`,
     [{ label: "取消", value: "cancel" }]
   );
@@ -2008,6 +2174,7 @@ async function showCommandPalette() {
     else if (v.includes("保存") || v.includes("save")) void saveCurrent();
     else if (v.includes("转发") || v.includes("forward")) void addForward();
     else if (v.includes("关于") || v.includes("about") || v.includes("版本")) void showAbout();
+    else if (v.includes("设置") || v.includes("setting")) void showSettings();
   });
 }
 

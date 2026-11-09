@@ -282,10 +282,10 @@ export class TerminalHost {
     const input = box.querySelector("input") as HTMLInputElement;
     const opts: ISearchOptions = {
       decorations: {
-        matchBackground: "#5a4a00",
-        matchOverviewRuler: "#5a4a00",
-        activeMatchBackground: "#4ea1ff",
-        activeMatchColorOverviewRuler: "#4ea1ff",
+        matchBackground: "#3a2450",
+        matchOverviewRuler: "#3a2450",
+        activeMatchBackground: "#8b5fbf",
+        activeMatchColorOverviewRuler: "#8b5fbf",
       },
     };
     const run = (back: boolean) => {
