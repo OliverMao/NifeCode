@@ -1,5 +1,5 @@
 import "./style.css";
-import { iconFor, iconSvg, uiIcon } from "./icons";
+import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
@@ -1186,6 +1186,19 @@ async function boot() {
   renderTabs();
 
   $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newTerminal(); };
+  // 界面小按钮统一用自绘 SVG（＋ ✕ ˅），别用字体里那些大小不一的符号
+  for (const [id, name] of [
+    ["#ctx-new", "plus"],
+    ["#btn-open-folder", "plus"],
+    ["#btn-ssh-new", "plus"],
+    ["#btn-shell", "chevron"],
+    ["#btn-new-term", "plus"],
+    ["#btn-close-panel", "close"],
+  ]) {
+    const el = $(id);
+    if (el) el.innerHTML = chromeIcon(name);
+  }
+
   $<HTMLButtonElement>("#btn-shell").onclick = async (ev) => {
     const btn = ev.currentTarget as HTMLButtonElement;
     const r = btn.getBoundingClientRect();

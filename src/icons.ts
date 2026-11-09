@@ -148,3 +148,16 @@ export function uiIcon(name: string): string {
   if (!d) return "";
   return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 }
+
+// ---------- 界面上的小按钮（＋ ✕ ˅），跟活动栏同一路子自己画 ----------
+const CHROME: Record<string, string> = {
+  plus: '<path d="M8 3.2v9.6M3.2 8h9.6"/>',
+  close: '<path d="M4.1 4.1 11.9 11.9M11.9 4.1 4.1 11.9"/>',
+  chevron: '<path d="M4.4 6.5 8 10.1l3.6-3.6"/>',
+};
+
+export function chromeIcon(name: string): string {
+  const d = CHROME[name];
+  if (!d) return "";
+  return `<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+}

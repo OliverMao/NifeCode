@@ -1,3 +1,4 @@
+import { chromeIcon, iconSvg, iconFor } from "./icons";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -55,7 +56,7 @@ export class TerminalHost {
     this.addBtn = document.createElement("button");
     this.addBtn.className = "ttab-add";
     this.addBtn.title = "新建一页（独立的一组终端）";
-    this.addBtn.textContent = "＋";
+    this.addBtn.innerHTML = chromeIcon("plus");
     this.addBtn.onclick = () => this.newPage(true);
     this.tabs.appendChild(this.addBtn);
   }
@@ -94,7 +95,7 @@ export class TerminalHost {
 
     const tab = document.createElement("div");
     tab.className = "ttab";
-    tab.innerHTML = `<span class="tno">页 ${no}</span><span class="x">✕</span>`;
+    tab.innerHTML = `<span class="tno">页 ${no}</span><span class="x">${chromeIcon("close")}</span>`;
     this.tabs.insertBefore(tab, this.addBtn);
     this.body.appendChild(el);
 
@@ -179,7 +180,7 @@ export class TerminalHost {
     head.innerHTML = `<span>终端 ${no} · ${tag}</span><span class="spacer"></span>`;
     const close = document.createElement("span");
     close.className = "x";
-    close.textContent = "✕";
+    close.innerHTML = chromeIcon("close");
     head.appendChild(close);
     const termBody = document.createElement("div");
     termBody.className = "term-body";
