@@ -8,7 +8,7 @@ import { EditorHost } from "./editor";
 import { TerminalHost } from "./terminal";
 
 interface Entry { name: string; path: string; is_dir: boolean }
-interface ReadFile { content: string; mtime: number; encoding: string }
+interface ReadFile { content: string; mtime: number; encoding: string; huge?: boolean }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -30,6 +30,8 @@ interface Ctx {
   host: string | null;
   port: number;
   root: string | null;
+  online?: boolean;    // 只有 SSH 用：false = 从上次会话恢复出来的、还没连
+  wantRoot?: string;   // 重连后要回的目录（不是 $HOME 的时候）
 }
 
 const CTX_KEY = "contexts";
@@ -37,25 +39,39 @@ let ctxSeq = 1;
 const contexts: Ctx[] = [{ id: "local:1", kind: "local", label: "本机", host: null, port: 22, root: null }];
 let activeId = "local:1";
 
-/** 只持久化本机标签（SSH 标签需要重连，不还原） */
+/** 本机和 SSH 标签都存；SSH 下次启动先当"未连接"，点一下再连 */
 function saveCtxs() {
   const cur = curCtx();
-  if (cur && cur.kind === "local") cur.root = root;
-  const locals = contexts.filter((c) => c.kind === "local").map((c) => ({ id: c.id, label: c.label, root: c.root }));
-  localStorage.setItem(CTX_KEY, JSON.stringify({ locals, activeId }));
+  if (cur) cur.root = root;
+  const tabs = contexts.map((c) =>
+    c.kind === "local"
+      ? { id: c.id, label: c.label, root: c.root }
+      : { id: c.id, label: c.label, root: c.root, host: c.host, port: c.port }
+  );
+  localStorage.setItem(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
 }
 
 function restoreCtxs() {
   try {
     const raw = localStorage.getItem(CTX_KEY);
     if (!raw) return;
-    const data = JSON.parse(raw) as { locals?: { id: string; label: string; root: string | null }[]; activeId?: string };
+    const data = JSON.parse(raw) as {
+      locals?: { id: string; label: string; root: string | null; host?: string | null; port?: number }[];
+      activeId?: string;
+    };
     if (!data.locals?.length) return;
     contexts.length = 0;
     for (const l of data.locals) {
-      contexts.push({ id: l.id, kind: "local", label: l.label, host: null, port: 22, root: l.root });
-      const n = Number(l.id.split(":")[1] ?? 1);
-      if (n > ctxSeq) ctxSeq = n;
+      const isSsh = l.id.startsWith("ssh:");
+      contexts.push({
+        id: l.id,
+        kind: isSsh ? "ssh" : "local",
+        label: l.label,
+        host: isSsh ? (l.host ?? null) : null,
+        port: l.port ?? 22,
+        root: l.root,
+        online: isSsh ? false : undefined,
+      });
     }
     activeId = contexts.some((c) => c.id === data.activeId) ? data.activeId! : contexts[0].id;
   } catch { /* 存坏了就用默认 */ }
@@ -72,6 +88,12 @@ async function pickFolder(): Promise<string | null> {
   return await invoke<string | null>("pick_folder").catch(() => null);
 }
 
+/** 从上次会话恢复出来、还没连上的 SSH 标签：这时候别去碰它，否则每 5 秒一次 ssh 握手/弹密码 */
+function offlineCtx(): boolean {
+  const c = curCtx();
+  return c.kind === "ssh" && c.online === false;
+}
+
 function curCtx(): Ctx {
   return contexts.find((c) => c.id === activeId) ?? contexts[0];
 }
@@ -81,7 +103,7 @@ function renderCtxBar() {
   bar.innerHTML = "";
   for (const c of contexts) {
     const el = document.createElement("div");
-    el.className = "ctx-tab" + (c.id === activeId ? " active" : "");
+    el.className = "ctx-tab" + (c.id === activeId ? " active" : "") + (c.online === false ? " offline" : "");
     const nm = document.createElement("span");
     nm.textContent = c.kind === "ssh" ? `SSH · ${c.label}` : c.label;
     nm.title = c.root ?? "";
@@ -125,10 +147,30 @@ function switchContext(id: string) {
   renderSsh();
   $("#tree").innerHTML = "";
   expanded.clear();
+  const c = curCtx();
+  if (c.kind === "ssh" && c.online === false) {
+    // 上次会话恢复出来的标签：点一下就重连，连上再回原来的目录
+    $("#tree").innerHTML = `<div class="tree-tip">未连接，正在重连…</div>`;
+    setMsg(`正在重连 ${c.label}…`);
+    void reconnectCtx(c);
+    return;
+  }
   if (root) void renderTree(root, $("#tree"), 0);
   if ($("#scm").classList.contains("active")) void loadGit();
   else renderGit(null);
   setMsg(root ?? "未打开文件夹");
+}
+
+/** 恢复出来的 SSH 标签：用保存的配置重连（key 也在配置里） */
+async function reconnectCtx(c: Ctx) {
+  const prof = sshProfiles().find((p) => `ssh:${p.id}` === c.id);
+  if (!prof) {
+    $("#tree").innerHTML = `<div class="tree-tip">找不到这个连接的配置了</div>`;
+    setMsg("找不到这个连接的配置");
+    return;
+  }
+  c.wantRoot = c.root ?? undefined;
+  await connectProfile(prof);
 }
 
 async function closeContext(id: string) {
@@ -251,6 +293,56 @@ function ask(title: string, bodyHTML: string, buttons: Btn[]): Promise<string> {
   });
 }
 function closeModal() { $("#modal").classList.add("hidden"); }
+
+// ---------- 未保存内容快照（崩溃/断电后还能捞回来） ----------
+const DIRTY_KEY = "dirty-buffers";
+/** shortcut: 只存本机文档，远端要靠连接才能恢复；单文件超过 2MB 不存，升级点：存到磁盘而不是 localStorage */
+function snapshotDirty() {
+  const list = editor
+    .dirtyPaths()
+    .map((p) => {
+      const d = editor.docsFor(p)!;
+      return { path: p, content: d.model.getValue().slice(0, 2_000_000), encoding: d.encoding };
+    })
+    .filter((it) => !editor.docsFor(it.path)?.host);
+  try {
+    if (list.length) localStorage.setItem(DIRTY_KEY, JSON.stringify(list));
+    else localStorage.removeItem(DIRTY_KEY);
+  } catch {
+    /* 存不下就算了，别让快照把界面搞崩 */
+  }
+}
+
+async function restoreDirty() {
+  const raw = localStorage.getItem(DIRTY_KEY);
+  if (!raw) return;
+  localStorage.removeItem(DIRTY_KEY); // 只恢复一次
+  let list: { path: string; content: string; encoding: string }[] = [];
+  try {
+    list = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!Array.isArray(list) || !list.length) return;
+  const r = await ask(
+    "恢复未保存的更改",
+    `上次退出时有 ${list.length} 个文件没保存：${list.map((x) => baseName(x.path)).join("、")}。要恢复这些改动吗？`,
+    [
+      { label: "恢复", value: "ok", primary: true },
+      { label: "丢弃", value: "no" },
+    ]
+  );
+  if (r !== "ok") return;
+  let n = 0;
+  for (const it of list) {
+    const res = await invoke<ReadFile>("read_file", { host: null, port: 22, path: it.path }).catch(() => null);
+    if (!res) continue;
+    editor.openDirty(it.path, it.content, res.mtime, null, 22, it.encoding);
+    n++;
+  }
+  renderTabs();
+  setMsg(n ? `恢复了 ${n} 个文件` : "没有可恢复的文件");
+}
 
 // ---------- 编辑器 ----------
 // ---------- 字号缩放（Ctrl+= / Ctrl+- / Ctrl+0）----------
@@ -407,6 +499,22 @@ function baseName(p: string) {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
 
+/** 关标签（✕ 和 Ctrl+W 共用），有未保存改动会先问 */
+async function closeTab(p: string) {
+  const d = editor.docsFor(p);
+  if (d && editor.isDirty(d)) {
+    const r = await ask("未保存的更改", `“${baseName(p)}” 有未保存的更改，要保存吗？`, [
+      { label: "保存", value: "save", primary: true },
+      { label: "不保存", value: "discard" },
+      { label: "取消", value: "cancel" },
+    ]);
+    if (r === "cancel") return;
+    if (r === "save") await savePath(p);
+  }
+  editor.close(p);
+  renderTabs();
+}
+
 function markTabDirty(path: string, dirty: boolean) {
   const el = Array.from($("#tabs").children).find((c) => (c as HTMLElement).dataset.path === path) as HTMLElement | undefined;
   el?.classList.toggle("dirty", dirty);
@@ -415,6 +523,7 @@ function markTabDirty(path: string, dirty: boolean) {
 function renderTabs(activePath?: string) {
   const box = $("#tabs");
   box.innerHTML = "";
+  if ((activePath ?? editor.current()?.path) && document.getElementById("img-view")) closeImage();
   const cur = activePath ?? editor.current()?.path;
   for (const p of editor.paths()) {
     const el = document.createElement("div");
@@ -432,18 +541,7 @@ function renderTabs(activePath?: string) {
     x.textContent = "✕";
     x.onclick = async (e) => {
       e.stopPropagation();
-      const d = editor.docsFor(p);
-      if (d && editor.isDirty(d)) {
-        const r = await ask("未保存的更改", `“${baseName(p)}” 有未保存的更改，要保存吗？`, [
-          { label: "保存", value: "save", primary: true },
-          { label: "不保存", value: "discard" },
-          { label: "取消", value: "cancel" },
-        ]);
-        if (r === "cancel") return;
-        if (r === "save") await savePath(p);
-      }
-      editor.close(p);
-      renderTabs();
+      await closeTab(p);
     };
     el.append(name, x);
     el.onclick = () => { editor.show(p); renderTabs(p); };
@@ -453,6 +551,8 @@ function renderTabs(activePath?: string) {
 }
 
 // ---------- 打开 / 保存 ----------
+const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+
 async function openFile(path: string, line?: number) {
   if (editor.has(path)) {
     editor.show(path);
@@ -460,17 +560,51 @@ async function openFile(path: string, line?: number) {
     renderTabs(path);
     return;
   }
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (IMAGE_EXT.includes(ext)) {
+    await openImage(path, ext);
+    return;
+  }
   try {
     const c = curCtx();
     const res = await invoke<ReadFile>("read_file", { host: c.host, port: c.port, path });
-    editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding);
+    const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge);
+    if (res.huge) setMsg(`${baseName(path)} 超过 8MB，已只读打开`);
     if (line) editor.revealLine(line);
     renderTabs(path);
-    $<HTMLSpanElement>("#st-msg").textContent = path;
+    if (!res.huge) $<HTMLSpanElement>("#st-msg").textContent = path;
+    void d;
   } catch (e) {
     lastError = `open ${path}: ${e}`;
     setMsg(`打开失败：${e}`);
   }
+}
+
+/** 图片预览：不改编辑器标签，盖一层浮层（带尺寸和关闭） */
+async function openImage(path: string, ext: string) {
+  setMsg(`正在载入图片 ${baseName(path)}…`);
+  try {
+    const c = curCtx();
+    const b64 = await invoke<string>("read_binary", { host: c.host, port: c.port, path });
+    const mime = ext === "svg" ? "image/svg+xml" : `image/${ext === "jpg" ? "jpeg" : ext}`;
+    closeImage();
+    const box = document.createElement("div");
+    box.id = "img-view";
+    box.innerHTML = `<div class="hd"><span class="nm"></span><span class="spacer"></span><span class="sz"></span><span class="x" title="关闭">✕</span></div><div class="bd"><img alt="" /></div>`;
+    box.querySelector(".nm")!.textContent = path;
+    const img = box.querySelector("img") as HTMLImageElement;
+    img.src = `data:${mime};base64,${b64}`;
+    img.onload = () => { box.querySelector(".sz")!.textContent = `${img.naturalWidth} × ${img.naturalHeight} · ${Math.round((b64.length * 3) / 4 / 1024)} KB`; };
+    (box.querySelector(".x") as HTMLElement).onclick = closeImage;
+    $("#editor").parentElement!.appendChild(box);
+    setMsg(path);
+  } catch (e) {
+    setMsg(`图片打不开：${e}`);
+  }
+}
+
+function closeImage() {
+  document.getElementById("img-view")?.remove();
 }
 
 async function savePath(path: string) {
@@ -967,6 +1101,7 @@ async function connectProfile(p: SshProfile) {
 
     const cid = `ssh:${p.id}`;
     let c = contexts.find((x) => x.id === cid);
+    const wasOffline = c?.online === false; // 从上次会话恢复的标签：连不上要留着
     if (!c) {
       c = { id: cid, kind: "ssh", label: p.name, host: p.target, port: p.port, root: null };
       contexts.push(c);
@@ -975,6 +1110,7 @@ async function connectProfile(p: SshProfile) {
       c.host = p.target;
       c.port = p.port;
     }
+    if (!c.wantRoot && c.root && c.root !== c.wantRoot) c.wantRoot = c.root;
     activeId = cid;
     applyActive();
     renderCtxBar();
@@ -991,16 +1127,19 @@ async function connectProfile(p: SshProfile) {
         invoke<string>("ssh_home", { target: p.target, port: p.port }),
         new Promise<string>((_, rej) => setTimeout(() => rej("连接超时（20 秒）"), 20000)),
       ]);
-      c.root = home;
+      c.online = true;
+      c.root = c.wantRoot || home;
+      c.wantRoot = undefined;
       applyActive();
       renderCtxBar();
       setConnLabel();
       renderSsh();
-      await openRoot(home);
-      setMsg(`已连接 ${p.name}（${home}）`);
+      await openRoot(c.root!);
+      setMsg(`已连接 ${p.name}（${c.root}）`);
     } catch (e) {
-      // 连不上就把这个空标签收回，别再留个死标签
-      contexts.splice(contexts.indexOf(c), 1);
+      // 连不上就把这个空标签收回，别再留个死标签（上次会话恢复出来的除外，用户下次还能再点）
+      if (wasOffline) c.online = false;
+      else contexts.splice(contexts.indexOf(c), 1);
       activeId = prev.id;
       applyActive();
       renderCtxBar();
@@ -1146,6 +1285,36 @@ async function runSearch() {
   } catch (e) {
     list.innerHTML = "";
     setMsg(`搜索失败：${e}`);
+  }
+}
+
+/** 全项目替换：直接改磁盘，改完把改过的文件里已打开且不脏的重新读一遍 */
+async function runReplace() {
+  const q = $<HTMLInputElement>("#search-input").value.trim();
+  const to = $<HTMLInputElement>("#replace-input").value;
+  if (!root || !q) { setMsg("先在上面填要搜的内容"); return; }
+  const r = await ask("全部替换", `把当前工作区里所有 “${q}” 换成 “${to}”，直接写磁盘，不可撤销。`, [
+    { label: "替换", value: "ok", primary: true },
+    { label: "取消", value: "no" },
+  ]);
+  if (r !== "ok") return;
+  setMsg("替换中…");
+  try {
+    const changed = await invoke<string[]>("replace_all", { ...connArg(), cwd: root, query: q, replacement: to, max: 200 });
+    for (const rel of changed) {
+      const abs = absJoin(root, rel);
+      const d = editor.docsFor(abs);
+      if (d && !editor.isDirty(d)) {
+        const res = await invoke<ReadFile>("read_file", { host: d.host, port: d.port, path: abs }).catch(() => null);
+        if (res) editor.reopen(abs, res.content, res.mtime, res.encoding);
+      }
+    }
+    fileCache = null;
+    setMsg(changed.length ? `替换了 ${changed.length} 个文件` : "没有文件被改");
+    await runSearch();
+    renderTabs();
+  } catch (e) {
+    setMsg(`替换失败：${e}`);
   }
 }
 
@@ -1391,6 +1560,10 @@ async function boot() {
   $<HTMLInputElement>("#search-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); void runSearch(); }
   });
+  $<HTMLInputElement>("#replace-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); void runReplace(); }
+  });
+  $<HTMLButtonElement>("#replace-all").onclick = () => void runReplace();
   $<HTMLSpanElement>("#st-fwd").onclick = async () => {
     const fwds = await invoke<Forward[]>("fwd_list").catch(() => []);
     if (!fwds.length) return;
@@ -1453,6 +1626,33 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (e.ctrlKey && !e.shiftKey && (e.key === "p" || e.key === "P")) {
       e.preventDefault();
       void quickOpen();
+      return;
+    }
+    // 标签：Ctrl+W 关、Ctrl+Tab / Ctrl+Shift+Tab 切换、Ctrl+1~9 跳
+    if (e.ctrlKey && !e.shiftKey && (e.key === "w" || e.key === "W")) {
+      e.preventDefault();
+      const cur = editor.current();
+      if (cur) void closeTab(cur.path);
+      return;
+    }
+    if (e.ctrlKey && e.key === "Tab") {
+      e.preventDefault();
+      const paths = editor.paths();
+      const i = paths.indexOf(editor.current()?.path ?? "");
+      if (paths.length > 1) {
+        const next = (i + (e.shiftKey ? paths.length - 1 : 1)) % paths.length;
+        editor.show(paths[next]);
+        renderTabs(paths[next]);
+      }
+      return;
+    }
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+      const p = editor.paths()[Number(e.key) - 1];
+      if (p) {
+        e.preventDefault();
+        editor.show(p);
+        renderTabs(p);
+      }
       return;
     }
     // 焦点不在编辑器里时 Monaco 收不到 Ctrl+S，这里补一下（在编辑器里就让它自己存，别存两次）
@@ -1519,18 +1719,23 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   // 远端链路贵：降频；窗口不可见时也别查
   setInterval(() => {
-    if (document.hidden) return;
+    if (document.hidden || offlineCtx()) return;
     void pollExternalChanges();
   }, host ? 10000 : 1200); // 远端一次轮询就是一次完整 ssh 往返，别太勤
-  setInterval(() => { if ($("#scm").classList.contains("active")) void loadGit(); }, 4000);
+  setInterval(() => {
+    if (offlineCtx()) return;
+    if ($("#scm").classList.contains("active")) void loadGit();
+  }, 4000);
   // 文件树自动刷新：只 stat 根目录 + 已展开的目录，变了才重画
   setInterval(() => {
-    if (document.hidden) return;
+    if (document.hidden || offlineCtx()) return;
     if (!$("#tree").classList.contains("hidden")) void pollTree();
   }, host ? 5000 : 1500);
   setInterval(() => { void pushBridgeState(); }, 2000);
+  setInterval(snapshotDirty, 3000);
 
   if (!root) setMsg("就绪：点击左侧 ＋ 打开文件夹，或点 🔌 连接 SSH");
+  void restoreDirty();
 }
 
 // ---------- Diff（agent 提案审阅）----------

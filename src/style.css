@@ -113,9 +113,23 @@ body {
 .ssh-row .ops span:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
 
 /* ---------- 搜索 ---------- */
+.tree-tip { padding: 14px 12px; color: var(--fg-dim); font-size: calc(var(--ui) - 1px); line-height: 1.6; }
+.ctx-tab.offline { opacity: .55; }
+.ctx-tab.offline .x { opacity: .8; }
 #search-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
 #search-panel.active { display: flex; }
-.search-box { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.search-box { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.search-box .replace-row { display: flex; gap: 6px; }
+.search-box .replace-row #replace-input { flex: 1; }
+#replace-all {
+  background: #3a3d41; color: #eee; border: 1px solid #555; border-radius: 2px;
+  padding: 0 10px; font: inherit; cursor: pointer; white-space: nowrap;
+}
+#replace-all:hover { background: #4a4d51; }
+#replace-input {
+  width: 100%; background: #3c3c3c; border: 1px solid #555; color: #eee;
+  padding: 5px 8px; border-radius: 2px; font: inherit;
+}
 #search-input {
   width: 100%; background: #3c3c3c; border: 1px solid #555; color: #eee;
   padding: 5px 8px; border-radius: 2px; font: inherit;
@@ -170,6 +184,21 @@ body {
 .node .badge { margin-left: auto; font-size: 10px; color: #e2c08d; }
 
 #main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+/* 图片预览：盖在编辑器上的一层 */
+#img-view { position: absolute; inset: 35px 0 0 0; background: #1e1e1e; display: flex; flex-direction: column; z-index: 4; }
+#img-view .hd {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px; background: #252526;
+  border-bottom: 1px solid var(--border); font-size: calc(var(--ui) - 1px); color: #ccc;
+}
+#img-view .hd .spacer { flex: 1; }
+#img-view .hd .sz { color: var(--fg-dim); }
+#img-view .hd .x { cursor: pointer; opacity: .75; padding: 0 4px; }
+#img-view .hd .x:hover { opacity: 1; }
+#img-view .bd { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
+#img-view img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto;
+  background-image: linear-gradient(45deg, #2a2a2a 25%, transparent 25%), linear-gradient(-45deg, #2a2a2a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #2a2a2a 75%), linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
+  background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0; }
 #tabs { display: flex; background: var(--bg-tab); overflow-x: auto; flex: 0 0 auto; height: 35px; }
 #tabs::-webkit-scrollbar { height: 0; }
 .tab {
@@ -230,7 +259,7 @@ body {
 }
 .term-splitter-h:hover { background: var(--accent); opacity: .6; }
 
-.term-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: clip; border-top: 1px solid #333; }
+.term-pane { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: clip; border-top: 1px solid #333; position: relative; }
 .term-pane:first-child { border-top: 0; }
 .term-pane.active .pane-head { background: #2a2d2e; color: #e7e7e7; }
 .pane-head {
@@ -244,6 +273,23 @@ body {
 /* overflow: clip（不是 hidden）——hidden 还是可滚动的容器，中文输入法的组合文字一长就会把
    终端整块滚偏 55px，看着就是闪一下。clip 根本不能滚，从根上没了这个问题。 */
 .term-body { flex: 1; min-height: 0; overflow: clip; padding: 2px 0 0 8px; }
+/* 终端内查找条：绝对定位盖在终端右上角，不占布局（占布局会让列数变化 -> 闪烁） */
+.term-find {
+  position: absolute; top: 4px; right: 18px; z-index: 5; display: flex; align-items: center; gap: 2px;
+  background: #252526; border: 1px solid #454545; border-radius: 3px; padding: 2px 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.45);
+}
+.term-find.hidden { display: none; }
+.term-find input {
+  width: 170px; background: #3c3c3c; border: 1px solid #555; color: #eee;
+  padding: 2px 6px; font: inherit; border-radius: 2px;
+}
+.term-find button {
+  background: transparent; border: 0; color: #ccc; cursor: pointer; font: inherit;
+  padding: 2px 5px; border-radius: 2px;
+}
+.term-find button:hover { background: rgba(255,255,255,.12); }
+
 /* 终端里的滚动条不占宽度：不然中文宽字符一进来、滚动条一出现，列数就变，整个界面抖 */
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }

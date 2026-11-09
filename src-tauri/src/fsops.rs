@@ -16,6 +16,7 @@ pub struct ReadFile {
     pub content: String,
     pub mtime: u64,
     pub encoding: String, // 猜出来的编码，保存时按它写回去
+    pub huge: bool,       // 大于 8MB：前端以只读方式打开
 }
 
 /// 文本解码。forced 是用户手动指定的编码（重新打开时用）
@@ -328,10 +329,10 @@ pub async fn read_file(
     match host {
         None => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
-            guard_size(meta.len(), &path)?;
+            let huge = guard_size(meta.len(), &path)?;
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             let (content, encoding) = decode_bytes(&bytes, encoding.as_deref());
-            Ok(ReadFile { content, mtime: mtime_ms(&meta), encoding })
+            Ok(ReadFile { content, mtime: mtime_ms(&meta), encoding, huge })
         }
         Some(h) => {
             // 一次 ssh 同时拿：大小 + mtime + 内容（每次 exec 在他们那种 237ms RTT 的链路上一来一回就是 3 秒）
@@ -339,7 +340,7 @@ pub async fn read_file(
             let cmd = format!(
                 "f={q}; if [ -r \"$f\" ]; then s=$(wc -c < \"$f\"); y=$(stat -c %Y -- \"$f\" 2>/dev/null || stat -f %m -- \"$f\" 2>/dev/null || echo 0); echo \"M=$s ${{y%% *}}\"; if [ \"$s\" -le {MAX} ]; then base64 -w0 -- \"$f\" 2>/dev/null || base64 \"$f\"; else echo TOOBIG; fi; else echo \"M=ERR 0\"; fi",
                 q = q,
-                MAX = MAX_OPEN_BYTES
+                MAX = HARD_MAX_BYTES
             );
             let raw = ssh_exec(&h, port, &cmd)?;
             let text = String::from_utf8_lossy(&raw).to_string();
@@ -352,7 +353,7 @@ pub async fn read_file(
                     Some((it.next()?.parse::<u64>().ok()?, it.next()?.parse::<u64>().ok()?))
                 })
                 .ok_or_else(|| format!("读不到 {} 的信息（文件不存在？）", path))?;
-            guard_size(size, &path)?;
+            let huge = guard_size(size, &path)?;
             let body = text
                 .splitn(2, '\n')
                 .nth(1)
@@ -363,7 +364,7 @@ pub async fn read_file(
                 Ok(bytes) => decode_bytes(&bytes, encoding.as_deref()),
                 Err(_) => (body.to_string(), "utf-8".into()),
             };
-            Ok(ReadFile { content, mtime: mtime * 1000, encoding })
+            Ok(ReadFile { content, mtime: mtime * 1000, encoding, huge })
         }
     }
 }
@@ -499,52 +500,53 @@ pub struct SearchHit {
 }
 
 const MAX_OPEN_BYTES: u64 = 8 * 1024 * 1024;
+/// 超过这个就不开了，硬上限
+const HARD_MAX_BYTES: u64 = 96 * 1024 * 1024;
 
-fn guard_size(size: u64, path: &str) -> Result<(), String> {
-    if size > MAX_OPEN_BYTES {
+fn guard_size(size: u64, path: &str) -> Result<bool, String> {
+    if size > HARD_MAX_BYTES {
         return Err(format!(
-            "文件 {} MB，超过 8MB 上限，暂不打开（{}）",
+            "文件 {} MB，超过 {}MB 硬上限，不开（{}）",
             size / 1024 / 1024,
+            HARD_MAX_BYTES / 1024 / 1024,
             path
         ));
     }
-    Ok(())
+    // 大于 8MB 还是给开，但标记一下，前端用只读方式打开
+    Ok(size > MAX_OPEN_BYTES)
 }
 
 const SKIP_DIRS: [&str; 9] = [".git", "node_modules", "target", "dist", "build", ".venv", "__pycache__", ".idea", ".next"];
 
+/// 本地递归：走 ignore 的遍历器，.gitignore / .ignore / git 全局忽略统统生效（跟 ripgrep 一个引擎）
+fn walker(root: &std::path::Path) -> impl Iterator<Item = ignore::DirEntry> {
+    ignore::WalkBuilder::new(root)
+        .hidden(false) // .github / .vscode 这类还是要能搜到
+        .require_git(false) // 不是 git 仓库的目录也认 .gitignore
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .build()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+}
+
 fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<SearchHit>) {
-    if out.len() >= max {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(root) else { return };
-    for e in rd.flatten() {
+    for e in walker(root) {
         if out.len() >= max {
             return;
-        }
-        let path = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            if SKIP_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            walk_search(&path, query, max, out);
-            continue;
         }
         let Ok(meta) = e.metadata() else { continue };
         if meta.len() > 2 * 1024 * 1024 {
             continue; // shortcut: 搜索跳过 2MB 以上的文件
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        let Ok(bytes) = std::fs::read(e.path()) else { continue };
         if bytes.iter().take(4096).any(|&b| b == 0) {
             continue; // 二进制
         }
-        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let (text, _) = decode_bytes(&bytes, None);
         for (i, line) in text.lines().enumerate() {
             if line.contains(query) {
                 out.push(SearchHit {
-                    path: path.to_string_lossy().replace('\\', "/"),
+                    path: e.path().to_string_lossy().replace('\\', "/"),
                     line: (i + 1) as u32,
                     text: line.trim().chars().take(200).collect(),
                 });
@@ -556,30 +558,34 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
     }
 }
 
-/// 本地走进程内遍历；远端跑一条 grep（GPU 服务器上肯定有 grep）
-fn walk_files(root: &std::path::Path, base: &std::path::Path, max: usize, out: &mut Vec<String>) {
-    if out.len() >= max {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(root) else { return };
-    for e in rd.flatten() {
-        if out.len() >= max {
-            return;
+/// 把本地文件里的 query 换成 replacement，返回动过的文件（相对路径）
+fn walk_replace(root: &std::path::Path, query: &str, to: &str, max: usize) -> Vec<String> {
+    let mut changed = Vec::new();
+    for e in walker(root) {
+        if changed.len() >= max {
+            break;
         }
-        let path = e.path();
-        let name = e.file_name().to_string_lossy().to_string();
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            if SKIP_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            walk_files(&path, base, max, out);
+        let Ok(meta) = e.metadata() else { continue };
+        if meta.len() > 2 * 1024 * 1024 {
             continue;
         }
-        if let Ok(rel) = path.strip_prefix(base) {
-            out.push(rel.to_string_lossy().replace('\\', "/"));
+        let Ok(bytes) = std::fs::read(e.path()) else { continue };
+        if bytes.iter().take(4096).any(|&b| b == 0) {
+            continue;
+        }
+        let (text, enc) = decode_bytes(&bytes, None);
+        if !text.contains(query) {
+            continue;
+        }
+        let next = text.replace(query, to);
+        let Ok(out) = encode_text(&next, &enc) else { continue };
+        if std::fs::write(e.path(), out).is_ok() {
+            if let Ok(rel) = e.path().strip_prefix(root) {
+                changed.push(rel.to_string_lossy().replace('\\', "/"));
+            }
         }
     }
+    changed
 }
 
 /// 快速打开（Ctrl+P）用的文件清单，返回相对工作区的路径
@@ -594,23 +600,108 @@ pub async fn list_files(
     match host {
         None => {
             let base = std::path::PathBuf::from(&root);
-            let mut out = Vec::new();
-            walk_files(&base, &base, max, &mut out);
+            let mut out: Vec<String> = walker(&base)
+                .filter_map(|e| e.path().strip_prefix(&base).ok().map(|r| r.to_string_lossy().replace('\\', "/")))
+                .take(max)
+                .collect();
             out.sort();
             Ok(out)
         }
         Some(h) => {
-            let mut cmd = format!("cd {} && find . -type f", shq(&root));
-            for d in SKIP_DIRS {
-                cmd.push_str(&format!(" -not -path '*/{d}/*'"));
-            }
-            cmd.push_str(&format!(" | head -n {max} | sed 's|^\\./||'"));
-            let out = ssh_exec(&h, port, &cmd)?;
-            Ok(String::from_utf8_lossy(&out)
+            // 远端优先用 git（自带 .gitignore 生效），不是仓库就退回 find
+            let git = format!(
+                "cd {r} && git ls-files -z -co --exclude-standard 2>/dev/null | tr '\\0' '\\n' | head -n {max}",
+                r = shq(&root),
+                max = max
+            );
+            let mut out = ssh_exec(&h, port, &git)?;
+            let mut lines: Vec<String> = String::from_utf8_lossy(&out)
                 .lines()
                 .map(|l| l.trim_end_matches('\r').to_string())
                 .filter(|l| !l.is_empty())
-                .collect())
+                .collect();
+            if lines.is_empty() {
+                let mut cmd = format!("cd {} && find . -type f", shq(&root));
+                for d in SKIP_DIRS {
+                    cmd.push_str(&format!(" -not -path '*/{d}/*'"));
+                }
+                cmd.push_str(&format!(" | head -n {max} | sed 's|^\\./||'"));
+                out = ssh_exec(&h, port, &cmd)?;
+                lines = String::from_utf8_lossy(&out)
+                    .lines()
+                    .map(|l| l.trim_end_matches('\r').to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+            }
+            Ok(lines)
+        }
+    }
+}
+
+/// 图片预览：把文件原样 base64 回给前端（本地读盘 / 远端也是一次命令）
+#[tauri::command]
+pub async fn read_binary(host: Option<String>, port: u16, path: String) -> Result<String, String> {
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    match host {
+        None => {
+            let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+            if meta.len() > LIMIT {
+                return Err(format!("图片 {} MB，太大了", meta.len() / 1024 / 1024));
+            }
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            Ok(B64.encode(bytes))
+        }
+        Some(h) => {
+            let cmd = format!(
+                "f={}; s=$(wc -c < \"$f\") || exit 1; if [ \"$s\" -gt {LIMIT} ]; then echo TOOBIG; else base64 -w0 -- \"$f\" 2>/dev/null || base64 \"$f\"; fi",
+                shq(&path)
+            );
+            let raw = ssh_exec(&h, port, &cmd)?;
+            let text = String::from_utf8_lossy(&raw).trim().to_string();
+            if text == "TOOBIG" {
+                return Err("图片太大".into());
+            }
+            Ok(text.replace(['\n', '\r'], ""))
+        }
+    }
+}
+
+/// 全项目替换，返回动过的文件（相对路径）
+#[tauri::command]
+pub async fn replace_all(
+    host: Option<String>,
+    port: u16,
+    cwd: String,
+    query: String,
+    replacement: String,
+    max: usize,
+) -> Result<Vec<String>, String> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max = max.clamp(1, 200);
+    match host {
+        None => Ok(walk_replace(std::path::Path::new(&cwd), &query, &replacement, max)),
+        Some(h) => {
+            // 远端：先找命中文件，再逐个 base64 拉回来改完写回（最多 50 个，多了太慢）
+            let cmd = format!(
+                "cd {} && grep -rlI --binary-files=without-match --exclude-dir=.git -- {} . | head -50 | sed 's|^\\./||'",
+                shq(&cwd),
+                shq(&query)
+            );
+            let raw = ssh_exec(&h, port, &cmd)?;
+            let mut changed = Vec::new();
+            for rel in String::from_utf8_lossy(&raw).lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+                let abs = format!("{}/{}", cwd.trim_end_matches('/'), rel);
+                let file = read_file(Some(h.clone()), port, abs.clone(), None).await?;
+                if !file.content.contains(&query) {
+                    continue;
+                }
+                let next = file.content.replace(&query, &replacement);
+                write_file(Some(h.clone()), port, abs, next, file.encoding).await?;
+                changed.push(rel.to_string());
+            }
+            Ok(changed)
         }
     }
 }

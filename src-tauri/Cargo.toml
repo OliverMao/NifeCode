@@ -23,6 +23,7 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 tauri-plugin-clipboard-manager = "2.5.0"
 encoding_rs = "0.8.44"
+ignore = "0.4.34"
 
 [profile.dev]
 incremental = true

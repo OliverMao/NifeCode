@@ -1,6 +1,7 @@
 import { chromeIcon, iconSvg, iconFor } from "./icons";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -201,8 +202,11 @@ export class TerminalHost {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon();
+    term.loadAddon(search);
     term.open(termBody);
     this.bindClipboard(term, termBody);
+    this.bindFind(term, search, el, termBody);
 
     // 连着 SSH 时新终端直接 ssh 过去（这样密码认证也能用）
     const remote = this.ssh();
@@ -249,6 +253,10 @@ export class TerminalHost {
         void readText().then((t) => t && term.paste(t)).catch(() => {});
         return false;
       }
+      if (k === "f" && !e.shiftKey) {                            // Ctrl+F：终端里查找
+        host.dispatchEvent(new CustomEvent("nife:find", { bubbles: true }));
+        return false;
+      }
       return true;
     });
     host.addEventListener("contextmenu", (ev) => {
@@ -256,6 +264,53 @@ export class TerminalHost {
       if (term.hasSelection()) copy();
       else void readText().then((t) => t && term.paste(t)).catch(() => {});
     });
+  }
+
+  /** 终端内查找（Ctrl+F）。找不到就当作什么都没发生，不弹任何东西 */
+  private bindFind(term: Terminal, search: SearchAddon, paneEl: HTMLElement, termBody: HTMLElement) {
+    const box = document.createElement("div");
+    box.className = "term-find hidden";
+    box.innerHTML = `<input spellcheck="false" placeholder="在终端中查找" />
+      <button class="prev" title="上一个（Shift+Enter）">↑</button>
+      <button class="next" title="下一个（Enter）">↓</button>
+      <button class="close" title="关闭（Esc）">✕</button>`;
+    paneEl.appendChild(box);
+    const input = box.querySelector("input") as HTMLInputElement;
+    const opts: ISearchOptions = {
+      decorations: {
+        matchBackground: "#5a4a00",
+        matchOverviewRuler: "#5a4a00",
+        activeMatchBackground: "#4ea1ff",
+        activeMatchColorOverviewRuler: "#4ea1ff",
+      },
+    };
+    const run = (back: boolean) => {
+      const q = input.value;
+      if (!q) return;
+      if (back) search.findPrevious(q, opts);
+      else search.findNext(q, opts);
+    };
+    const open = () => {
+      box.classList.remove("hidden");
+      const sel = term.getSelection();
+      if (sel && !sel.includes("\n")) input.value = sel;
+      input.focus();
+      input.select();
+    };
+    const close = () => {
+      box.classList.add("hidden");
+      search.clearDecorations();
+      term.focus();
+    };
+    (box.querySelector(".next") as HTMLElement).onclick = () => run(false);
+    (box.querySelector(".prev") as HTMLElement).onclick = () => run(true);
+    (box.querySelector(".close") as HTMLElement).onclick = close;
+    input.oninput = () => run(false);
+    input.onkeydown = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      else if (e.key === "Enter") { e.preventDefault(); run(e.shiftKey); }
+    };
+    paneEl.addEventListener("nife:find", open);
   }
 
   focus(id?: number) {

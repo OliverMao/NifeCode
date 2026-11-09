@@ -140,17 +140,25 @@ export class EditorHost {
     mtime: number,
     host: string | null = null,
     port = 22,
-    encoding = "utf-8"
+    encoding = "utf-8",
+    readOnly = false
   ): Doc {
     let d = this.docs.get(path);
     if (!d) {
       const model = monaco.editor.createModel(content, languageOf(path), monaco.Uri.file(path));
       // 默认 LF：文本里没出现过 CR 就不跟随 Windows 的 CRLF，新建文件/新行都是 LF
       if (!content.includes("\r")) model.setEOL(monaco.editor.EndOfLineSequence.LF);
-      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly: false, host, port, encoding };
+      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly, host, port, encoding };
       this.docs.set(path, d);
     }
     this.show(path);
+    return d;
+  }
+
+  /** 崩溃恢复用：内容来自缓存，直接当脏文档打开 */
+  openDirty(path: string, content: string, mtime: number, host: string | null, port: number, encoding: string) {
+    const d = this.open(path, content, mtime, host, port, encoding);
+    d.savedVersion = -1; // 跟任何版本都不相等 -> 一直显示脏
     return d;
   }
 
@@ -169,6 +177,7 @@ export class EditorHost {
     const d = this.docs.get(path);
     if (!d) return;
     if (this.ed.getModel() !== d.model) this.ed.setModel(d.model);
+    this.ed.updateOptions({ readOnly: d.readOnly }); // 超大文件只读
     this.ed.focus();
   }
 
