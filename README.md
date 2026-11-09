@@ -24,11 +24,12 @@ Windows 下 release 版常驻内存实测：**175MB**（编辑器 + 文件树 + 
 - **悬停看全名**：文件名/路径被截断时，悬停 0.35 秒弹出完整路径（没截断就不打扰）；编辑器标签同理
 - **右键菜单**：新建文件 / 新建文件夹 / 粘贴 / 打开 / 在此打开工作区 / **复制绝对路径** / **复制相对路径** / 复制 / 剪切 / 重命名 / 删除 / **在终端中打开** / **在资源管理器中显示**（后两项只有本机有，远端自动隐藏）。剪贴板记着来源机器，本地文件不会粘到远端去；`/` 和盘符根目录有保护，不会误删。文件树空白处右键可复制工作区路径
 - **三栏布局**：文件管理 ｜ 编辑器 ｜ 终端，**三条边界都能拖**（侧栏 150~700px，终端 240px 起），宽度存 localStorage，重启保留
-- **终端列分页**：一页 = 一组互相独立的终端（标签栏 `页 1 / 页 2 / ＋`）；页内 `＋` 再开一个终端，上下堆叠，**终端之间的横条可以拖**调各自高度；关掉页里最后一个终端会自动关掉这页
+- **终端列分页**：一页 = 一组互相独立的终端（标签栏一个页签 = 一页）。面板头只有三个按钮：`＋` 新建一页、`˅` 在**当前页**新建终端（展开选类型：PowerShell / cmd / Git Bash / WSL）、`✕` 收起终端列。页内终端上下堆叠，**终端之间的横条可以拖**调各自高度；关掉页里最后一个终端会自动关掉这页
 - 终端栏不会空着：启动就有 `页 1` + 一个 shell，关掉最后一页也立刻补一个
-- 一个页里只有 1 个终端时不显示它的小标题栏（省一行），开到第 2 个才出现 `终端 1 · 本地 ✕`；`✕` 只在多于一个页/终端时出现，不会误关
+- 每个终端自己的标题条（`终端 1 · Windows PowerShell`）右侧有 `⊟` 拆分和 `✕` 关闭：拆分是**照抄这个终端的类型**在当前页再开一个，关闭只关这一个。标题条常显，因为拆分按钮只在它上面
+- **终端页改名**：双击页签（或双击终端自己的标题条）就地改名，回车保存、Esc 取消、清空回车退回自动名字（自动名字 = 第一个终端的 shell 名，重名自动加 `(2)`）
 - **外部改动检测**：文件被别的程序（比如 agent）改动后自动重载；你有未保存改动时会弹窗让你选"用磁盘版本 / 保留我的"
-- **本地终端**：`xterm.js` + 真实 PTY，支持中文、颜色、resize，可多开
+- **本地终端**：`xterm.js` + 真实 PTY，支持中文、颜色、resize，可多开。终端里会带上 `NIFECODE_TERM=1`、`NIFECODE_BRIDGE=http://127.0.0.1:7317`、`NIFECODE_ROOT=<工作区根>`，跑在里面的 agent（比如 Nife）据此知道自己"在 NifeCode 里"，不用靠猜
 - **字号可调**：`Ctrl+=` / `Ctrl+-` / `Ctrl+0`（10~28px）。编辑器（Monaco）、终端（xterm）和后界面文字（文件树、标签栏、状态栏、SSH/搜索/SCM 面板、右键菜单、弹窗）一起缩放，靠 CSS 变量 `--ui` 驱动，存 localStorage
 - **终端类型可选**：终端栏的 `˅` 列出这台机器上能用的 shell —— PowerShell（默认）/ cmd / Git Bash / WSL 各发行版；选过的会记住，下次新建终端就用它。工作目录自动跟随当前工作区（WSL 里是 `/mnt/d/...`）
 - **输入中文不闪**：三层原因逐个堵掉了 —— ① 终端自己的滚动条不占布局宽度；② `pty_resize` 加 80ms 去抖（列数变一次就够，别一帧抖好几次）；③ 终端容器用 `overflow: clip` 而不是 `hidden`：`hidden` 仍然是可滚动容器，输入法的组合文字长过终端右边缘时，Chromium 会自动把整块终端滚偏几十像素来"露出"它，看着就是闪一下（扯到 TUI 上就是整屏抖）
@@ -72,12 +73,12 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 | 产物 | 路径 | 说明 |
 |---|---|---|
 | 免安装单文件 | `src-tauri/target/release/nifecode.exe` | 双击就跑，不写注册表、不进开始菜单，放哪都行 |
-| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.4_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
+| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.5_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
 
 两个都**不需要额外文件**（前端已内嵌进 exe）。免安装版就是那个普通 release 二进制，改个名而已：
 
 ```bash
-cp src-tauri/target/release/nifecode.exe NifeCode_0.1.4_x64_portable.exe
+cp src-tauri/target/release/nifecode.exe NifeCode_0.1.5_x64_portable.exe
 ```
 
 ## 自动更新
@@ -102,14 +103,14 @@ NIFECODE_UPDATE_URL="https://某处/latest.json" ./nifecode.exe
 `latest.json` 只需要 GitHub Release API 的那几个字段：
 
 ```json
-{ "tag_name": "v0.1.4", "body": "更新说明", "assets": [
-  { "name": "NifeCode_0.1.4_x64_portable.exe", "size": 17185000,
-    "browser_download_url": "https://.../NifeCode_0.1.4_x64_portable.exe" } ] }
+{ "tag_name": "v0.1.5", "body": "更新说明", "assets": [
+  { "name": "NifeCode_0.1.5_x64_portable.exe", "size": 17185000,
+    "browser_download_url": "https://.../NifeCode_0.1.5_x64_portable.exe" } ] }
 ```
 
 ## 应用图标
 
-紫色 `#452760` 方块 + 中间一根白竖条，就两个元素。全部由 `scripts/make-icon.mjs` 用代码画（32×32），仓库里没有任何图片素材，也没引图标库。
+紫色 `#452760` 圆角方块 + 中间一根白竖条，就两个元素。全部由 `scripts/make-icon.mjs` 用代码画，一次出 **16/24/32/48/64/128/256 七档**（每档 4 倍超采样再降采样，所以放大到 256 边缘也不糊），仓库里没有任何图片素材，也没引图标库。
 
 ```
 node scripts/make-icon.mjs   # 改完重跑，再 pnpm tauri build 才会进 exe / 安装包
@@ -131,7 +132,11 @@ node scripts/make-icon.mjs   # 改完重跑，再 pnpm tauri build 才会进 exe
 | `Ctrl+1` … `Ctrl+9` | 跳到第 N 个标签 |
 | `Ctrl+`` ` | 显示/隐藏终端列 |
 | `Ctrl+Shift+P` | 命令面板（打开文件夹 / SSH / 终端 / 保存） |
+| `F2` | 重命名文件树里选中的那一项 |
+| `Delete` | 删除文件树里选中的项（多选一起删，删前确认） |
 | `Esc` | 关闭弹窗 |
+
+`F2` / `Delete` 认的是「最后一次点的是文件树」，所以点开一个文件、焦点跑到编辑器之后照样能用；但在编辑器/终端/输入框里按 `Delete` 仍然是删字符（不会误删文件）。
 
 终端里（xterm 自己不管剪贴板，这些是本项目加的）：
 
@@ -141,6 +146,7 @@ node scripts/make-icon.mjs   # 改完重跑，再 pnpm tauri build 才会进 exe
 | `Ctrl+Shift+C` | 强制复制选中内容 |
 | `Ctrl+Shift+V` | 粘贴 |
 | `Ctrl+F` | 在终端里查找（`↑`/`↓` 跳，Esc 关） |
+| `Ctrl+点击` | 点输出里的**文件路径**直接打开（带 `:行号` 就跳过去，相对路径按工作区根算）、点 **URL** 用系统浏览器打开；普通单击不抢，选文本不会跳走 |
 | 鼠标右键 | 有选中就复制，没选中就粘贴（跟 Windows Terminal 一样） |
 
 ## SSH
@@ -308,12 +314,27 @@ curl http://127.0.0.1:7317/state
 
 注意：Windows 的 bash 里 JSON 反斜杠容易被吃掉，路径一律用 `/`。
 
+用 Nife 的话不用手写 curl，仓库里带了个小客户端（相对路径按工作区根算、编码和引号都处理好、失败退出码非 0）：
+
+```bash
+node scripts/nife.mjs state                  # root / 当前文件 / 脏文件 / 选中内容 / 光标
+node scripts/nife.mjs open src/main.ts:120   # 打开并跳到第 120 行
+node scripts/nife.mjs save                   # 保存所有未保存的文件（带路径就只存一个）
+node scripts/nife.mjs diff src/a.ts new.txt  # 拿 new.txt 全文弹左右对照，等人点「应用」
+```
+
+要让 Nife **自动**知道这些，装扩展 `~/.nife/agent/extensions/nifecode-bridge.ts`：它在每轮开始前探一下
+`127.0.0.1:7317`，**编辑器在跑**才把接口用法和实时状态（root / 当前文件 / 脏文件 / 选中内容 / 光标）追加进系统提示，
+没启动就完全静默——不要写进全局 `AGENTS.md`，那会污染所有无关项目。
+
 **给 agent 看的完整说明在 [AGENTS.md](AGENTS.md)**（接口表、`/state` 字段含义、PowerShell 的 `curl.exe` 坑、推荐工作流、以及哪些能力目前还没有）。把那个文件丢给 agent，或者直接让它读仓库根目录的 `AGENTS.md` 就行。
 
 `/state` 返回示例：
 
 ```json
-{"root":"D:/proj","host":null,"file":"D:/proj/src/main.ts","dirty":[],"selection":null,"lastError":null}
+{"root":"D:/proj","host":null,"file":"D:/proj/src/main.ts","dirty":[],
+ "selection":{"file":"D:/proj/src/main.ts","startLine":3,"endLine":9,"text":"…"},
+ "cursor":{"file":"D:/proj/src/main.ts","line":12,"column":5},"lastError":null}
 ```
 
 ## 上下文标签（本机 / SSH）

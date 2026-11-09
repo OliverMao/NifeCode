@@ -626,7 +626,10 @@ function bumpFont(d: number | "reset") {
 const editor = new EditorHost(
   $("#editor"),
   (path, dirty) => markTabDirty(path, dirty),
-  (line, col) => { $<HTMLSpanElement>("#st-pos").textContent = `行 ${line}，列 ${col}`; },
+  (line, col) => {
+    $<HTMLSpanElement>("#st-pos").textContent = `行 ${line}，列 ${col}`;
+    (window as any).__cur = { line, column: col }; // 给 bridge 的 cursor 用
+  },
   () => void saveCurrent()
 );
 
@@ -948,19 +951,26 @@ function closeImage() {
   document.getElementById("img-view")?.remove();
 }
 
-async function savePath(path: string) {
+/** 真正写盘，失败会抛（bridge 的 /save 要知道成功与否） */
+async function savePathRaw(path: string) {
   const doc = editor.docsFor(path);
-  if (!doc) return;
+  if (!doc) throw new Error("没有打开的文档");
+  const mtime = await invoke<number>("write_file", {
+    host: doc.host,
+    port: doc.port,
+    path,
+    content: doc.model.getValue(),
+    encoding: doc.encoding,
+  });
+  editor.markSaved(path, mtime);
+  renderTabs(path);
+  return mtime;
+}
+
+async function savePath(path: string) {
+  if (!editor.docsFor(path)) return;
   try {
-    const mtime = await invoke<number>("write_file", {
-      host: doc.host,
-      port: doc.port,
-      path,
-      content: doc.model.getValue(),
-      encoding: doc.encoding,
-    });
-    editor.markSaved(path, mtime);
-    renderTabs(path);
+    await savePathRaw(path);
     setMsg(`已保存 ${baseName(path)}`);
   } catch (e) {
     setMsg(`保存失败：${e}`);
@@ -988,6 +998,7 @@ let clip: { paths: string[]; host: string | null; port: number; cut: boolean } |
 // 文件树多选：点一下单选，Ctrl 点切换，Shift 点连选一段
 const sel = new Set<string>();
 let selAnchor = "";
+let treeFocus = false; // 最后一次点击落在文件树上（决定 F2/Delete 归谁）
 
 /** 换工作区/上下文时清掉多选（路径已经不是同一套了） */
 function clearSel() {
@@ -1261,6 +1272,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     bindTip(row, name, () => e.path);
 
     const select = (ev: MouseEvent) => {
+      treeFocus = true;
       const all = [...document.querySelectorAll<HTMLElement>(".node")];
       if (ev.shiftKey && selAnchor) {
         const a = all.findIndex((r) => r.dataset.path === selAnchor);
@@ -1387,6 +1399,7 @@ function termSet(): TermSet {
       const sh = shellList.find((x) => x.id === preferredShell) ?? shellList[0];
       return sh ? { id: sh.id, name: sh.name } : null;
     },
+    (text) => void openLink(text),
   );
   const set = { host, wrap };
   termSets.set(c.id, set);
@@ -1863,10 +1876,35 @@ async function pollExternalChanges() {
   }
 }
 
+/** 终端里 Ctrl+点击拿到的文字：URL 走系统浏览器，文件路径走编辑器 */
+async function openLink(text: string) {
+  if (/^https?:\/\//i.test(text)) {
+    try {
+      await invoke("open_url", { url: text });
+    } catch (e) {
+      setMsg(`打不开链接：${e}`);
+    }
+    return;
+  }
+  const tail = /:(\d+)(?::\d+)?$/.exec(text);
+  const lineNo = tail ? Number(tail[1]) : undefined;
+  let p = tail ? text.slice(0, text.length - tail[0].length) : text;
+  const abs = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("~");
+  if (!abs) {
+    if (!root) return;
+    p = joinPath(root, p.replace(/^[.][\\/]/, "")); // 相对路径按项目根算
+  }
+  p = p.replace(/\\/g, "/");
+  // shortcut: 远程 ~ 只认 /home/<user>，别的用户目录请用绝对路径
+  if (p.startsWith("~")) p = `/home/${p.slice(1).replace(/^[\\/]/, "")}`;
+  await openFile(p, lineNo);
+}
+
 // ---------- Agent Bridge ----------
 async function pushBridgeState() {
   const d = editor.current();
   const sel = (window as any).__sel;
+  const cur = (window as any).__cur;
   await invoke("bridge_set_state", {
     state: {
       root,
@@ -1874,6 +1912,8 @@ async function pushBridgeState() {
       file: d?.path ?? null,
       dirty: editor.dirtyPaths(),
       selection: sel ?? null,
+      // 光标位置：人只说"这里"没选中东西时，agent 至少知道往哪一行下手
+      cursor: d && cur ? { file: d.path, line: cur.line, column: cur.column } : null,
       lastError,
     },
   }).catch(() => {});
@@ -2272,6 +2312,30 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (e.key === "Escape") closeModal();
   });
 
+  // 资源管理器键盘：F2 改名、Delete 删除。
+  // 点文件会打开它、焦点跑到 Monaco，所以不能看 activeElement，得看"最后一次点是哪儿"
+  document.addEventListener("mousedown", (e) => {
+    if (!(e.target as HTMLElement).closest("#tree")) treeFocus = false;
+  }, true);
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key !== "F2" && e.key !== "Delete") return;
+    if (!treeFocus || sel.size === 0) return;
+    const a = document.activeElement as HTMLElement | null;
+    const typing = !!a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable);
+    if (e.key === "F2") {
+      e.preventDefault();
+      e.stopPropagation();
+      if (sel.size > 1) { setMsg("重命名一次只能改一个"); return; }
+      void renameEntry([...sel][0]);
+    } else {
+      if (typing) return; // 在编辑器/终端/输入框里按 Delete 应该删字符
+      e.preventDefault();
+      e.stopPropagation();
+      void deleteEntry([...sel]);
+    }
+  });
+
   // 缩放放在捕获阶段：编辑器聚焦时 Monaco 会先把按键吃掉，捕获能保证我们先处理
   document.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
@@ -2280,7 +2344,33 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     else if (e.key === "0") { e.preventDefault(); e.stopPropagation(); bumpFont("reset"); }
   }, true);
 
-  await listen<{ path: string; line?: number }>("bridge:open", (e) => { void openFile(e.payload.path, e.payload.line); });
+  await listen<{ path: string; line?: number }>("bridge:open", (e) => {
+    // 相对路径按工作区根算，别落到编辑器进程的 cwd 上
+    const p = e.payload.path.replace(/\\/g, "/");
+    const abs = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/");
+    void openFile((abs || !root ? p : joinPath(root, p)).replace(/\\/g, "/"), e.payload.line);
+  });
+  // 外面（agent）要保存文件：写完把结果回给 Rust，HTTP 那边才回 200/500
+  await listen<{ path?: string }>("bridge:save", async (e) => {
+    const want = e.payload?.path;
+    const targets = want ? [want] : editor.paths().filter((p) => { const d = editor.docsFor(p); return d && editor.isDirty(d); });
+    const saved: string[] = [];
+    const errors: { path: string; error: string }[] = [];
+    for (const p of targets) {
+      if (!editor.docsFor(p)) {
+        errors.push({ path: p, error: "没有打开这个文件" });
+        continue;
+      }
+      try {
+        await savePathRaw(p);
+        saved.push(p);
+      } catch (err) {
+        errors.push({ path: p, error: String(err) });
+      }
+    }
+    if (saved.length) setMsg(`Agent 触发的保存：${saved.length} 个文件`);
+    await invoke("bridge_save_result", { res: { ok: errors.length === 0, saved, errors } }).catch(() => {});
+  });
   await listen<{ path: string }>("bridge:workspace", (e) => { host = null; setConnLabel(); void openRoot(e.payload.path); });
   await listen<{ path: string; oldContent?: string; newContent: string }>("bridge:diff", async (e) => {
     setMsg(`Agent 提案：${baseName(e.payload.path)}`);

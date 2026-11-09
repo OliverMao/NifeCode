@@ -14,3 +14,27 @@ pub fn hide_console(cmd: &mut Command) -> &mut Command {
     }
     cmd
 }
+
+/// 用系统默认程序打开 http/https 链接。
+/// rundll32 只吃一个参数（不走 cmd），URL 里有 `&` `|` 也不会被当命令解释
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("只支持 http/https 链接".into());
+    }
+    let mut c = Command::new("rundll32.exe");
+    c.arg("url.dll,FileProtocolHandler").arg(&url);
+    hide_console(&mut c);
+    c.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_url;
+
+    #[test]
+    fn rejects_non_http() {
+        assert!(open_url("file:///C:/Windows".into()).is_err());
+        assert!(open_url("calc.exe".into()).is_err());
+    }
+}

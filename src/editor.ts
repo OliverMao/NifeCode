@@ -82,6 +82,22 @@ export class EditorHost {
       if (d) onDirty(d.path, this.isDirty(d));
     });
     this.ed.onDidChangeCursorPosition((e) => onCursor(e.position.lineNumber, e.position.column));
+    // 选中的内容给 agent bridge 用（/state 里的 selection）
+    this.ed.onDidChangeCursorSelection(() => {
+      const d = this.current();
+      const sel = this.ed.getSelection();
+      if (!d || !sel || sel.isEmpty()) {
+        (window as any).__sel = null;
+        return;
+      }
+      const text = d.model.getValueInRange(sel);
+      (window as any).__sel = {
+        file: d.path,
+        startLine: sel.startLineNumber,
+        endLine: sel.endLineNumber,
+        text: text.length > 4000 ? `${text.slice(0, 4000)}…` : text,
+      };
+    });
     this.ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, onSave);
   }
 

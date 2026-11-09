@@ -2,6 +2,7 @@
 // Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 import { chromeIcon, iconSvg, iconFor } from "./icons";
 import { Terminal } from "@xterm/xterm";
+import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
@@ -17,6 +18,10 @@ function b64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+
+// 终端里可点开的：URL、带 / 的路径（可带 :行号）。故意不认裸文件名，
+// 否则 `ls` 的每一行都是链接，选文本时满屏手型光标
+const LINK_RE = /https?:\/\/[^\s"'`<>()\]]+|(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/])?[\w.@$+-]+(?:[\\/][\w.@$+-]+)+(?::\d+)?/g;
 
 interface Pane {
   id: number;
@@ -60,6 +65,7 @@ export class TerminalHost {
     private cwd: () => string | undefined,
     private ssh: () => { target: string; port: number } | null = () => null,
     private shell: () => { id: string; name: string } | null = () => null,
+    private openLink: (text: string) => void = () => {},
   ) {
     this.empty = document.createElement("div");
     this.empty.className = "term-empty";
@@ -221,6 +227,7 @@ export class TerminalHost {
     const search = new SearchAddon();
     term.loadAddon(search);
     term.open(termBody);
+    this.bindLinks(term);
     this.bindClipboard(term, termBody);
     this.bindFind(term, search, el, termBody);
 
@@ -259,6 +266,35 @@ export class TerminalHost {
     this.refresh(page);
     this.focus(id);
     return id;
+  }
+
+  /** 终端输出里的路径/URL：Ctrl+点击 打开。普通点击不抢，免得选文本手一抖就跳走 */
+  private bindLinks(term: Terminal) {
+    const provider: ILinkProvider = {
+      provideLinks: (lineNo, cb) => {
+        const line = term.buffer.active.getLine(lineNo - 1);
+        if (!line) return cb(void 0);
+        const text = line.translateToString(true);
+        const links: ILink[] = [];
+        for (const m of text.matchAll(LINK_RE)) {
+          // 句末的标点不算路径的一部分
+          const raw = m[0].replace(/[.,;:!?)\]}"'`]+$/, "");
+          if (raw.length < 3) continue;
+          const x = (m.index ?? 0) + 1;
+          links.push({
+            range: { start: { x, y: lineNo }, end: { x: x + raw.length - 1, y: lineNo } },
+            text: raw,
+            activate: (ev, txt) => {
+              if (!(ev.ctrlKey || ev.metaKey)) return;
+              ev.preventDefault();
+              this.openLink(txt);
+            },
+          });
+        }
+        cb(links.length ? links : void 0);
+      },
+    };
+    term.registerLinkProvider(provider);
   }
 
   /** 复制/粘贴：xterm 自己不管剪贴板，Ctrl+C 默认只会发 ^C */

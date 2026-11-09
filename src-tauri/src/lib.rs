@@ -61,6 +61,8 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             bridge::bridge_set_state,
+            bridge::bridge_save_result,
+            proc::open_url,
             git::git_info,
             git::git_head_file,
             git::git_commit,

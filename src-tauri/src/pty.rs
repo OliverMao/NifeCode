@@ -184,7 +184,7 @@ pub fn pty_open(
                         c.arg(a);
                     }
                     // cwd 统一给 Windows 路径：wsl.exe 自己会翻译成 /mnt/...
-                    if let Some(dir) = cwd {
+                    if let Some(dir) = &cwd {
                         c.cwd(dir);
                     }
                     c
@@ -194,6 +194,14 @@ pub fn pty_open(
         }
     };
     cmd.env("TERM", "xterm-256color");
+    // 给终端里跑的程序一个“你在 NifeCode 里”的信号（ssh 那条分支不会带上，正常）
+    cmd.env("NIFECODE_TERM", "1");
+    cmd.env("NIFECODE_BRIDGE", &format!("http://127.0.0.1:{}", crate::bridge::PORT));
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            cmd.env("NIFECODE_ROOT", dir);
+        }
+    }
     pair.slave.spawn_command(cmd).map_err(|e| format!("启动终端失败：{e}"))?;
     drop(pair.slave);
 

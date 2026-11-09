@@ -2,17 +2,30 @@
 // Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::Sender;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const PORT: u16 = 7317;
 
 #[derive(Default)]
-pub struct BridgeState(pub Mutex<serde_json::Value>);
+pub struct BridgeState(
+    pub Mutex<serde_json::Value>,
+    /// /save 等待前端回结果用的通道（同一时刻只允许一个保存请求）
+    pub Mutex<Option<Sender<serde_json::Value>>>,
+);
 
 #[tauri::command]
 pub fn bridge_set_state(st: State<BridgeState>, state: serde_json::Value) {
     *st.0.lock().unwrap() = state;
+}
+
+/// 前端保存完（或失败）后把结果送回这里，HTTP 那边才回包
+#[tauri::command]
+pub fn bridge_save_result(st: State<BridgeState>, res: serde_json::Value) {
+    if let Some(tx) = st.1.lock().unwrap().take() {
+        let _ = tx.send(res);
+    }
 }
 
 pub fn spawn(app: AppHandle) {
@@ -76,25 +89,36 @@ fn handle(mut stream: TcpStream, app: AppHandle) -> std::io::Result<()> {
     let head = String::from_utf8_lossy(&buf[..start]).to_string();
     let end = (start + content_len).min(buf.len());
     let body = &buf[start..end];
-    let json: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "[bridge] JSON 解析失败: {e} (cl={content_len} buflen={} start={start})",
-                buf.len()
-            );
-            // 别悄悄吃掉：body 写错（比如 GBK 编码带着中文）必须让调用方看见
-            return respond(
-                &mut stream,
-                400,
-                "body 不是合法 JSON（中文请用 UTF-8 编码写临时文件）",
-            );
-        }
-    };
 
     let mut req = head.lines().next().unwrap_or("").split_whitespace();
     let method = req.next().unwrap_or("");
     let path = req.next().unwrap_or("/");
+
+    // GET 没 body 是正常的（/state），POST 没 body 说明调用方写错了
+    let json: serde_json::Value = if body.is_empty() {
+        if method == "GET" {
+            serde_json::Value::Null
+        } else {
+            return respond(&mut stream, 400, "body 是空的");
+        }
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "[bridge] JSON 解析失败: {e} (cl={content_len} buflen={} start={start})",
+                    buf.len()
+                );
+                // 别悄悄吃掉：body 写错（比如 GBK 编码带着中文）必须让调用方看见
+                return respond(
+                    &mut stream,
+                    400,
+                    "body 不是合法 JSON（中文请用 UTF-8 编码写临时文件）",
+                );
+            }
+        }
+    };
+
     eprintln!("[bridge] {method} {path}");
 
     match (method, path) {
@@ -114,7 +138,16 @@ fn handle(mut stream: TcpStream, app: AppHandle) -> std::io::Result<()> {
             }
         }
         ("POST", "/save") => {
-            let _ = app.emit("bridge:save", json);
+            // 别先回 ok 再偷偷失败：在这儿等前端把真正写盘的结果送回来
+            let (tx, rx) = std::sync::mpsc::channel();
+            *app.state::<BridgeState>().1.lock().unwrap() = Some(tx);
+            if let Err(e) = app.emit("bridge:save", json.clone()) {
+                eprintln!("[bridge] emit save 失败: {e}");
+            }
+            return match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok(v) => respond_json(&mut stream, 200, &v),
+                Err(_) => respond(&mut stream, 504, "60 秒内没等到前端保存结果"),
+            };
         }
         ("POST", "/workspace") => {
             if let Err(e) = app.emit("bridge:workspace", json.clone()) {
