@@ -630,6 +630,17 @@ function renderTabs(activePath?: string) {
     };
     box.appendChild(el);
   }
+  // 当前标签滚动到可见范围（标签多到装不下时，Ctrl+Tab 切过去也能看见）
+  const box2 = $("#tabs");
+  const active2 = box2.querySelector<HTMLElement>(".tab.active");
+  if (active2) {
+    const left = box2.scrollLeft;
+    const right = left + box2.clientWidth;
+    if (active2.offsetLeft < left) box2.scrollLeft = active2.offsetLeft;
+    else if (active2.offsetLeft + active2.offsetWidth > right) {
+      box2.scrollLeft = active2.offsetLeft + active2.offsetWidth - box2.clientWidth;
+    }
+  }
   renderStatusInfo();
 }
 
@@ -1610,6 +1621,19 @@ async function boot() {
     setMsg(`已打开 ${dir}`);
   };
   $("#tree").addEventListener("scroll", hideTip, true);
+
+  // 标签栏：滚轮直接横向滚（滚轮是竖直的，浏览器不会帮你滚一个只能横滚的容器）
+  $("#tabs").addEventListener(
+    "wheel",
+    (e) => {
+      const box = $("#tabs");
+      if (box.scrollWidth <= box.clientWidth) return; // 放得下就别拦
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; // 横向手势（触摸板）交给浏览器
+      e.preventDefault();
+      box.scrollLeft += e.deltaY;
+    },
+    { passive: false }
+  );
 
   $("#tree").addEventListener("contextmenu", (ev) => {
     const t = ev.target as HTMLElement;
