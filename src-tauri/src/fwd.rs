@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 use serde::Serialize;
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};

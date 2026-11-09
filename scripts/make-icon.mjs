@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 生成一个 32x32 的 ICO，省掉找图标素材
 // 图形：一块纯色方底 + 中间一根白竖条。底色是品牌紫 #452760
 import { writeFileSync, mkdirSync } from "node:fs";

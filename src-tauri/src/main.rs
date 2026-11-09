@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 
 fn main() {
     // ssh 需要密码时会把本程序当 SSH_ASKPASS 助手调起来，直接吐密码然后退出。

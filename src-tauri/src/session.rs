@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 //! 常驻 ssh 执行通道
 //!
 //! 每打开一条 `ssh -T <host> bash`，之后的命令直接写进它的 stdin、从 stdout 读结果，

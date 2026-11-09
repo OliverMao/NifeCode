@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // WebView2 缓存清理：只删可重建的缓存目录，绝不碰 Local Storage / 登录态 / 配置
 use serde::Serialize;
 use std::path::{Path, PathBuf};

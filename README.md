@@ -72,12 +72,39 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 | 产物 | 路径 | 说明 |
 |---|---|---|
 | 免安装单文件 | `src-tauri/target/release/nifecode.exe` | 双击就跑，不写注册表、不进开始菜单，放哪都行 |
-| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.1_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
+| 安装包 | `src-tauri/target/release/bundle/nsis/NifeCode_0.1.2_x64-setup.exe` | NSIS，装到 `%LOCALAPPDATA%`，带开始菜单和卸载项 |
 
 两个都**不需要额外文件**（前端已内嵌进 exe）。免安装版就是那个普通 release 二进制，改个名而已：
 
 ```bash
-cp src-tauri/target/release/nifecode.exe NifeCode_0.1.1_x64_portable.exe
+cp src-tauri/target/release/nifecode.exe NifeCode_0.1.2_x64_portable.exe
+```
+
+## 自动更新
+
+启动 6 秒后静默查一次更新，也可以在「关于」里点**检查更新**手动查。发现新版会问一句，确认后：
+
+1. `curl` 下载便携版 exe 到程序目录，校验字节数
+2. 把**正在运行的** exe 改名成 `NifeCode.old.exe`（Windows 允许改名运行中的 exe，不能直接覆盖）
+3. 下载好的 exe 落到原位置，spawn 新进程，旧进程退出
+4. 新进程启动时顺手删掉 `NifeCode.old.exe`
+
+不需要管理员权限，不需要签名私钥，**便携版也能自己更新**（这也是 Chrome / VS Code 同款招数）。程序目录不可写（比如装在 `Program Files`）时会明确报错让你手动下安装包。
+
+没用 `tauri-plugin-updater`：那套只认 NSIS/MSI，要么弹安装器要么要求维护一对 minisign 密钥；单文件便携版用不上。
+
+更新源默认是 `https://api.github.com/repos/OliverMao/NifeCode/releases/latest`，会取最新 Release 里名字含 `portable` 的 `.exe`。**这个仓库现在是私有的，匿名请求会 404**，所以要么把仓库转公开，要么换个公开的中转地址：
+
+```bash
+NIFECODE_UPDATE_URL="https://某处/latest.json" ./nifecode.exe
+```
+
+`latest.json` 只需要 GitHub Release API 的那几个字段：
+
+```json
+{ "tag_name": "v0.1.2", "body": "更新说明", "assets": [
+  { "name": "NifeCode_0.1.2_x64_portable.exe", "size": 17002496,
+    "browser_download_url": "https://.../NifeCode_0.1.2_x64_portable.exe" } ] }
 ```
 
 ## 应用图标
@@ -281,6 +308,8 @@ curl http://127.0.0.1:7317/state
 
 注意：Windows 的 bash 里 JSON 反斜杠容易被吃掉，路径一律用 `/`。
 
+**给 agent 看的完整说明在 [AGENTS.md](AGENTS.md)**（接口表、`/state` 字段含义、PowerShell 的 `curl.exe` 坑、推荐工作流、以及哪些能力目前还没有）。把那个文件丢给 agent，或者直接让它读仓库根目录的 `AGENTS.md` 就行。
+
 `/state` 返回示例：
 
 ```json
@@ -369,6 +398,37 @@ src-tauri/src/
 scripts/           图标生成、CDP 截图与执行（make-icon.mjs 自绘图标，零素材）
 ```
 
+## 许可证
+
+**GNU 通用公共许可证第 3 版或更新版本（GPL-3.0-or-later）** —— 全文见 [LICENSE](LICENSE)。
+
+自己用、公司内部用、改、二次发行都可以；但**发行修改版必须同样开源**（含你改的那部分），不能拿去做闭源分支。要闭源商用得单独找我授权（版权在我手上，可以双许可）。
+
+### 为什么是这个
+
+把 494 个 Rust crate 加前端依赖的许可全扫了一遍，结论是**依赖不限制我们选什么**：
+
+| 依赖 | 许可 | 影响 |
+|---|---|---|
+| Tauri / tao / wry | `Apache-2.0 OR MIT` | Apache-2.0 与 GPLv3 兼容（**与 GPLv2 不兼容**，所以选 v3 不选 v2） |
+| libgit2（`vendored-libgit2`） | `GPL-2.0 WITH linking exception` | 有链接例外，不会传染到我们的代码 |
+| git2 / keyring / serde / base64 | `MIT OR Apache-2.0` | 随便选 |
+| portable-pty / rfd | `MIT` | 随便选 |
+| encoding_rs | `(Apache-2.0 OR MIT) AND BSD-3-Clause` | 保留声明即可 |
+| ignore | `Unlicense OR MIT` | 随便选 |
+| cssparser / selectors / option-ext | `MPL-2.0` | 文件级 copyleft，与 GPLv3 兼容 |
+| Monaco / xterm.js | `MIT` | 随便选 |
+
+既然依赖不逼我们，就按“严格”来：GPL-3.0 是桌面软件里最标准的强 copyleft，比 AGPL 合适（我们没有网络服务端，AGPL 只会吓跑使用者），比 MPL-2.0 严格（MPL 只覆盖被改的那几个文件，允许闭源整体）。
+
+不选 MIT/Apache-2.0 的原因很直接：那样任何人都能拿这套代码做个闭源商业版，这跟“严格”相反。
+
+### 用到了别人的东西
+
+- 前端内嵌 Monaco（MIT）和 xterm.js（MIT），Rust 侧依赖见 `src-tauri/Cargo.lock`
+- WebView2 是系统组件，随 Windows 提供，不随本项目分发
+- 本项目的每个源文件头部都有 `SPDX-License-Identifier: GPL-3.0-or-later`
+
 ## TODO
 
 - [x] **清理缓存功能**：设置里有一行「WebView 缓存」，显示当前占用，点「清理」只删可自动重建的缓存目录
@@ -376,6 +436,8 @@ scripts/           图标生成、CDP 截图与执行（make-icon.mjs 自绘图�
   **`Local Storage` 一律不碰**（SSH 档案、工作区标签、窗口宽度、各项设置都在这）。实测 204 MB → 8.4 MB，不用重启。
 
 ## 已知限制 / 下一步
+
+- 自动更新没有签名校验（项目本来就不签名），只校验下载字节数；文件来自 GitHub HTTPS
 
 - 没有 LSP（补全/跳转定义）；TS 语义校验已关闭，避免满屏假红
 - 没有扩展系统

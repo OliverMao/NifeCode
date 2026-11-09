@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 mod bridge;
 mod cache;
 mod fsops;
@@ -6,6 +8,7 @@ mod session;
 mod fwd;
 mod git;
 mod pty;
+mod update;
 
 pub fn run() {
     tauri::Builder::default()
@@ -15,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             bridge::spawn(app.handle().clone());
+            update::cleanup_old();
             // 预热：本会话第一次跑外部命令会被系统扫描，垫一次省得用户等
             std::thread::spawn(|| {
                 let mut c = std::process::Command::new("git");
@@ -60,6 +64,8 @@ pub fn run() {
             git::git_info,
             git::git_head_file,
             git::git_commit,
+            update::update_check,
+            update::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("NifeCode 启动失败");

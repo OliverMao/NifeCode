@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 通过 CDP 截取 WebView2 自身渲染的画面（比屏幕截图更准）
 import { writeFileSync } from "node:fs";
 

@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 import "./style.css";
 import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
@@ -303,7 +305,7 @@ const ABOUT_LOGO = `<svg width="104" height="104" viewBox="0 0 32 32" aria-hidde
 
 async function showAbout() {
   const v = await getVersion().catch(() => "");
-  await ask(
+  void ask(
     "关于",
     `<div class="about">
       <div class="logo">${ABOUT_LOGO}</div>
@@ -312,11 +314,72 @@ async function showAbout() {
       <div class="desc">轻量编辑器 · Monaco + xterm + Tauri<br/>SSH 远端开发 · 多标签工作区 · Agent Bridge</div>
       <div class="hp"></div>
       <a id="about-repo" title="点击复制仓库地址">github.com/OliverMao/NifeCode</a>
+      <div class="lic">GPL-3.0 许可 · © 2026 OliverMao</div>
+      <button id="about-update" class="mini">检查更新</button>
     </div>`,
     [{ label: "好", value: "ok", primary: true }]
   );
   const a = document.getElementById("about-repo");
   if (a) a.onclick = () => copyText("https://github.com/OliverMao/NifeCode");
+  const u = document.getElementById("about-update") as HTMLButtonElement | null;
+  if (u) {
+    u.onclick = async () => {
+      u.disabled = true;
+      u.textContent = "检查中";
+      const r = await checkUpdate(true);
+      u.disabled = false;
+      u.textContent = r === "none" ? "已是最新" : "检查更新";
+    };
+  }
+}
+
+// ---------- 更新 ----------
+interface UpdateInfo {
+  current: string;
+  latest: string;
+  size: number;
+  url: string;
+  notes: string;
+}
+
+/** 查更新；发现新版就在这里问用户要不要换。返回值给「关于」里的按钮用 */
+async function checkUpdate(manual: boolean): Promise<"none" | "found" | "fail"> {
+  if (manual) setMsg("正在检查更新…");
+  let info: UpdateInfo | null = null;
+  try {
+    info = await invoke<UpdateInfo | null>("update_check");
+  } catch (e) {
+    if (manual) setMsg(`检查更新失败：${e}`);
+    return "fail";
+  }
+  if (!info) {
+    if (manual) setMsg("已是最新版本");
+    return "none";
+  }
+  setMsg(`发现新版本 ${info.latest}`);
+  const mb = (info.size / 1048576).toFixed(1);
+  const yes = await ask(
+    "发现新版本",
+    `<div class="upd">
+      <p>${info.current} → <b>${info.latest}</b>（${mb} MB）</p>
+      <p class="dim">下载完会替换当前程序并自动重启，工作区标签和设置都保留。</p>
+    </div>`,
+    [
+      { label: "稍后", value: "no" },
+      { label: "下载并重启", value: "yes", primary: true },
+    ]
+  );
+  if (yes !== "yes") return "found";
+  setMsg(`正在下载 ${info.latest}…`);
+  try {
+    await invoke("update_install", { url: info.url, size: info.size });
+  } catch (e) {
+    setMsg("更新失败");
+    await ask("更新失败", `<p>${String(e).replace(/</g, "&lt;")}</p><p class="dim">可以到 GitHub Releases 手动下载。</p>`, [
+      { label: "好", value: "ok", primary: true },
+    ]);
+  }
+  return "found";
 }
 
 // ---------- 未保存内容快照（崩溃/断电后还能捞回来） ----------
@@ -1964,12 +2027,52 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   btnMin.onclick = () => void win.minimize();
   btnMax.onclick = () => void win.toggleMaximize();
   btnClose.onclick = () => void win.close();
-  // 双击标题栏空白处也最大化/还原（Windows 的老习惯）
-  $<HTMLDivElement>("#titlebar").addEventListener("dblclick", (e) => {
+  // 标题栏自己管拖动和双击。不用 data-tauri-drag-region：它一按下就进系统移动循环，
+  // 把第二次点击吃掉，双击最大化就永远不触发。改成移动超过 4px 才开始拖。
+  const titlebar = $<HTMLDivElement>("#titlebar");
+  let pend: { x: number; y: number } | null = null;
+  let lastDown = 0;
+  titlebar.addEventListener("pointerdown", (e) => {
     const t = e.target as HTMLElement;
-    if (t.closest("#brand") || t.closest("#winbtns")) return;
-    void win.toggleMaximize();
+    if (e.button !== 0 || t.closest("#brand") || t.closest("#winbtns")) return;
+    const now = Date.now();
+    if (now - lastDown < 400) {
+      lastDown = 0;
+      pend = null;
+      void win.toggleMaximize();
+      return;
+    }
+    lastDown = now;
+    pend = { x: e.clientX, y: e.clientY };
   });
+  titlebar.addEventListener("pointermove", (e) => {
+    if (!pend) return;
+    if (Math.abs(e.clientX - pend.x) + Math.abs(e.clientY - pend.y) < 4) return;
+    lastDown = 0;
+    pend = null;
+    void dragWindow(e);
+  });
+  const endDrag = () => {
+    pend = null;
+  };
+  // 最大化时拖动：先还原，把窗口摆到鼠标下面再接着拖（Windows / VS Code 就是这样）
+  const dragWindow = async (e: PointerEvent) => {
+    if (!(await win.isMaximized().catch(() => false))) {
+      await win.startDragging();
+      return;
+    }
+    const ratio = e.clientX / window.innerWidth; // 鼠标在标题栏里的横向比例
+    const curX = window.screenX + e.clientX;
+    const curY = window.screenY + e.clientY;
+    const barY = e.clientY; // 鼠标在标题栏中的纵向偏移，还原后保持不变
+    await win.unmaximize();
+    const sz = await win.innerSize();
+    const w = sz.width / window.devicePixelRatio;
+    await win.setPosition(new LogicalPosition(Math.round(curX - ratio * w), Math.round(curY - barY)));
+    await win.startDragging();
+  };
+  titlebar.addEventListener("pointerup", endDrag);
+  titlebar.addEventListener("pointercancel", endDrag);
   // 最大化时把图标换成"还原"，并去掉圆角留白
   const syncMaxIcon = async () => {
     const maxed = await win.isMaximized().catch(() => false);
@@ -2077,12 +2180,17 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   if (!root) setMsg("就绪：点击左侧 ＋ 打开文件夹，或点 🔌 连接 SSH");
   void restoreDirty();
+  // 启动几秒后静默查一次更新（默认连不上也不吵）
+  setTimeout(() => void checkUpdate(false), 6000);
 }
 
 // ---------- Diff（agent 提案审阅）----------
 async function openDiff(path: string, oldText: string, newText: string, opts: { title?: string; apply?: boolean } = {}) {
   const host_ = document.createElement("div");
-  host_.style.cssText = "position:fixed;inset:48px 0 22px 48px;z-index:50;background:#1e1e1e;display:flex;flex-direction:column;border-left:1px solid #333;";
+  // 放在 #main 里（而不是 body 上按 px 偏移）：只会盖住编辑器，标签栏和终端都还看得见；
+  // 拖分隔条、开/关终端列时跟着自适应，不用手动算偏移。
+  host_.style.cssText =
+    "position:absolute;top:35px;left:0;right:0;bottom:0;z-index:5;background:#1e1e1e;display:flex;flex-direction:column;border-top:1px solid #333;";
   const bar = document.createElement("div");
   bar.style.cssText = "display:flex;gap:8px;align-items:center;padding:6px 10px;background:#252526;font-size:12px;";
   bar.innerHTML = `<span style="flex:1">${opts.title ?? "Agent 修改提案"}：${baseName(path)}</span>`;
@@ -2097,10 +2205,18 @@ async function openDiff(path: string, oldText: string, newText: string, opts: { 
   const wrap = document.createElement("div");
   wrap.style.cssText = "flex:1;min-height:0;";
   host_.append(bar, wrap);
-  document.body.appendChild(host_);
+  $<HTMLDivElement>("#main").appendChild(host_);
 
   const { monaco } = await import("./editor");
-  const diff = monaco.editor.createDiffEditor(wrap, { theme: "vs-dark", automaticLayout: true, renderSideBySide: true });
+  // 编辑器列窄的时候（终端占了右半边）左右对照会挤成一团，Monaco 会自己切成单栏内联模式
+  const diff = monaco.editor.createDiffEditor(wrap, {
+    theme: "vs-dark",
+    automaticLayout: true,
+    renderSideBySide: true,
+    useInlineViewWhenSpaceIsLimited: true,
+    renderSideBySideInlineBreakpoint: 720,
+    wordWrap: "on", // 窄列里长行不折行就被切掉，看不清改了什么
+  });
   const m1 = monaco.editor.createModel(oldText, undefined, monaco.Uri.parse(`inmemory://original/${path}`));
   const m2 = monaco.editor.createModel(newText, undefined, monaco.Uri.parse(`inmemory://proposed/${path}`));
   diff.setModel({ original: m1, modified: m2 });

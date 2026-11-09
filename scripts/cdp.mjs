@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 通过 CDP 在 NifeCode 的 WebView2 里执行 JS，用于调试
 // 用法: node scripts/cdp.mjs "表达式"
 const PORT = process.env.CDP_PORT ?? 9222;

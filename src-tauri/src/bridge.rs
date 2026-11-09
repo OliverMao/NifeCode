@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
@@ -81,7 +83,12 @@ fn handle(mut stream: TcpStream, app: AppHandle) -> std::io::Result<()> {
                 "[bridge] JSON 解析失败: {e} (cl={content_len} buflen={} start={start})",
                 buf.len()
             );
-            serde_json::Value::Null
+            // 别悄悄吃掉：body 写错（比如 GBK 编码带着中文）必须让调用方看见
+            return respond(
+                &mut stream,
+                400,
+                "body 不是合法 JSON（中文请用 UTF-8 编码写临时文件）",
+            );
         }
     };
 

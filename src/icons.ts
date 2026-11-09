@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 16px 线性 SVG 图标集（自己画的，无外部资源）
 export interface IconSpec {
   glyph: string;

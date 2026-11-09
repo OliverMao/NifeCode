@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 通过 CDP Input 域发真实键盘事件（合成 DOM 事件进不了 xterm / Monaco）
 // 用法: node scripts/key.mjs "Ctrl+Tab" | "Ctrl+w" | "Ctrl+1" | "Ctrl+Shift+C"
 const PORT = process.env.CDP_PORT ?? 9222;

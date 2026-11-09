@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 // 用 CDP 合成中文输入法，看终端里到底往 pty 送了什么
 // 用法: node scripts/ime.mjs "n nih nihao"   (每段一次 composition 更新，最后提交)
 const PORT = process.env.CDP_PORT ?? 9222;

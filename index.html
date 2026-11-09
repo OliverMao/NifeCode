@@ -1,4 +1,6 @@
 <!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE -->
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -6,7 +8,7 @@
   </head>
   <body>
     <div id="app">
-      <div id="titlebar" data-tauri-drag-region>
+      <div id="titlebar">
         <button id="brand" title="主菜单">
           <svg viewBox="0 0 32 32" width="16" height="16" aria-hidden="true">
             <rect x="5" y="5" width="22" height="22" fill="#452760" rx="2"/>
@@ -14,7 +16,7 @@
           </svg>
           <span class="nm">NifeCode</span>
         </button>
-        <div class="drag" data-tauri-drag-region></div>
+        <div class="drag"></div>
         <div id="winbtns">
           <button id="win-min" title="最小化"></button>
           <button id="win-max" title="最大化"></button>

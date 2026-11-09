@@ -1,8 +1,10 @@
 [package]
 name = "nifecode"
-version = "0.1.1"
+version = "0.1.2"
 description = "轻量 VS Code 兼容编辑器（本地 + SSH + 终端 + Agent Bridge）"
 edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/OliverMao/NifeCode"
 
 [lib]
 name = "nifecode_lib"
