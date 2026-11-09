@@ -235,6 +235,9 @@ body {
 .pane-head .x { cursor: pointer; opacity: .7; padding: 0 4px; }
 .pane-head .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
 .term-body { flex: 1; min-height: 0; overflow: hidden; padding: 2px 0 0 8px; }
+/* 终端里的滚动条不占宽度：不然中文宽字符一进来、滚动条一出现，列数就变，整个界面抖 */
+.xterm .xterm-viewport { scrollbar-width: none; }
+.xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; }
 
 #status {
   grid-row: 3; grid-column: 1 / 5; background: var(--status); color: #fff; display: flex; align-items: center;

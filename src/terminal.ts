@@ -25,6 +25,7 @@ interface Pane {
   pageId: number;
   cols: number;   // 上一次下发给 PTY 的尺寸，用来去重
   rows: number;
+  rt?: number;    // resize 去抖定时器
 }
 
 /** 一页 = 一组互相独立的终端；页之间切换，页内可以堆叠多个 */
@@ -48,6 +49,7 @@ export class TerminalHost {
     private tabs: HTMLElement,   // #term-tabs（页标签栏）
     private cwd: () => string | undefined,
     private ssh: () => { target: string; port: number } | null = () => null,
+    private shell: () => { id: string; name: string } | null = () => null,
   ) {
     this.addBtn = document.createElement("button");
     this.addBtn.className = "ttab-add";
@@ -151,8 +153,15 @@ export class TerminalHost {
     this.activatePage(this.pages[Math.min(idx, this.pages.length - 1)].id);
   }
 
-  /** 在当前页新建一个终端（堆叠在下方） */
-  async newTerminal() {
+  /** 问一下这个 shell id 的显示名（主进程那边有检测结果） */
+  private async shellNameOf(id: string | null): Promise<string | null> {
+    if (!id) return this.shell()?.name ?? "本地";
+    const list = await invoke<{ id: string; name: string }[]>("shells").catch(() => []);
+    return list.find((x) => x.id === id)?.name ?? id;
+  }
+
+  /** 在当前页新建一个终端（堆叠在下方）；shellId 不传就用当前偏好 */
+  async newTerminal(shellId?: string) {
     await this.init();
     let page = this.pages[this.activePage];
     if (!page) page = this.newPage(false);
@@ -162,7 +171,10 @@ export class TerminalHost {
     el.className = "term-pane";
     const head = document.createElement("div");
     head.className = "pane-head";
-    const tag = this.ssh() ? `SSH ${this.ssh()!.target}` : "本地";
+    const wantShell = shellId ?? this.shell()?.id ?? null;
+    // 标签写这次真正用的那个 shell，不是当前偏好
+    const shellName = (await this.shellNameOf(wantShell)) ?? "本地";
+    const tag = this.ssh() ? `SSH ${this.ssh()!.target}` : shellName;
     head.innerHTML = `<span>终端 ${no} · ${tag}</span><span class="spacer"></span>`;
     const close = document.createElement("span");
     close.className = "x";
@@ -195,6 +207,7 @@ export class TerminalHost {
       cols: term.cols || 80,
       rows: term.rows || 24,
       ssh: remote ? { target: remote.target, port: remote.port, cwd: this.cwd() ?? null } : null,
+      shell: remote ? null : wantShell,
     });
 
     const pane: Pane = { id, no, term, fit, el, headEl: head, tag, pageId: page.id, cols: 0, rows: 0 };
@@ -336,12 +349,18 @@ export class TerminalHost {
     this.syncSize(p);
   }
 
-  // 尺寸没变就不发 pty_resize：ConPTY 每次 resize 都会让里面的程序整屏重绘
+  // ConPTY 每次 resize 都会让里面的程序整屏重绘，所以：
+  // 1) 尺寸没变就不发；2) 变的时候等 80ms 稳定下来再发，避免一帧里抖好几次（中文输入时尤其明显）
   private syncSize(p: Pane) {
     if (p.term.cols === p.cols && p.term.rows === p.rows) return;
-    p.cols = p.term.cols;
-    p.rows = p.term.rows;
-    void invoke("pty_resize", { id: p.id, cols: p.cols, rows: p.rows }).catch(() => {});
+    if (p.rt) clearTimeout(p.rt);
+    p.rt = window.setTimeout(() => {
+      p.rt = 0;
+      if (p.term.cols === p.cols && p.term.rows === p.rows) return;
+      p.cols = p.term.cols;
+      p.rows = p.term.rows;
+      void invoke("pty_resize", { id: p.id, cols: p.cols, rows: p.rows }).catch(() => {});
+    }, 80);
   }
 
   fitAll() {

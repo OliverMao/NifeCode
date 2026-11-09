@@ -569,11 +569,31 @@ async function openRoot(path: string) {
 }
 
 // ---------- 终端 ----------
+// ---------- 终端类型（PowerShell / cmd / WSL / Git Bash）----------
+interface ShellInfo { id: string; name: string; exe: string; args: string[] }
+const SHELL_KEY = "term-shell";
+let preferredShell = localStorage.getItem(SHELL_KEY) ?? "";
+let shellList: ShellInfo[] = [];
+
+async function loadShells() {
+  shellList = await invoke<ShellInfo[]>("shells").catch(() => []);
+  return shellList;
+}
+
+function currentShellName(): string {
+  const s = shellList.find((x) => x.id === preferredShell) ?? shellList[0];
+  return s?.name ?? "终端";
+}
+
 const terms = new TerminalHost(
   $("#terms"),
   $("#term-tabs"),
   () => root ?? undefined,
-  () => (host ? { target: host, port } : null)
+  () => (host ? { target: host, port } : null),
+  () => {
+    const s = shellList.find((x) => x.id === preferredShell) ?? shellList[0];
+    return s ? { id: s.id, name: s.name } : null;
+  }
 );
 
 function showTerm(on: boolean) {
@@ -1009,6 +1029,23 @@ async function boot() {
   renderTabs();
 
   $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newTerminal(); };
+  $<HTMLButtonElement>("#btn-shell").onclick = async (ev) => {
+    const btn = ev.currentTarget as HTMLButtonElement;
+    const r = btn.getBoundingClientRect();
+    if (shellList.length === 0) await loadShells();
+    const items: MenuItem[] = shellList.map((sh) => ({
+      label: `${sh.id === preferredShell ? "● " : "　"}${sh.name}`,
+      run: () => {
+        preferredShell = sh.id;
+        localStorage.setItem(SHELL_KEY, sh.id);
+        showTerm(true);
+        void terms.newTerminal(sh.id);
+        setMsg(`新终端：${sh.name}`);
+      },
+    }));
+    if (items.length === 0) items.push({ label: "没检测到可用终端", run: () => {} });
+    showMenu(r.left, r.bottom + 4, items);
+  };
   $<HTMLButtonElement>("#btn-close-panel").onclick = () => showTerm(false);
 
   // 拖动调整三栏宽度（资源管理器 / 编辑器 / 终端），宽度记到 localStorage
@@ -1093,6 +1130,7 @@ async function boot() {
   applyActive();
   renderCtxBar();
   if (root) void renderTree(root, $("#tree"), 0);
+  void loadShells();
   if (terms.count() === 0) void terms.newPage(true);
 
   $<HTMLButtonElement>("#btn-ssh-new").onclick = () => void editProfile();

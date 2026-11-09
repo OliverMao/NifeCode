@@ -44,6 +44,7 @@ pub fn run() {
             fsops::ssh_forget_password,
             fsops::ssh_has_password,
             pty::pty_open,
+            pty::shells,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
