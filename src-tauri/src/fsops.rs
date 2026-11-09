@@ -15,6 +15,66 @@ pub struct Entry {
 pub struct ReadFile {
     pub content: String,
     pub mtime: u64,
+    pub encoding: String, // 猜出来的编码，保存时按它写回去
+}
+
+/// 文本解码。forced 是用户手动指定的编码（重新打开时用）
+pub(crate) fn decode_bytes(bytes: &[u8], forced: Option<&str>) -> (String, String) {
+    // 先看 BOM，这个最权威
+    if forced.is_none() {
+        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            return (String::from_utf8_lossy(&bytes[3..]).to_string(), "utf-8".into());
+        }
+        if bytes.starts_with(&[0xFF, 0xFE]) {
+            let (s, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+            return (s.to_string(), "utf-16le".into());
+        }
+        if bytes.starts_with(&[0xFE, 0xFF]) {
+            let (s, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+            return (s.to_string(), "utf-16be".into());
+        }
+    }
+    if let Some(label) = forced {
+        let enc = encoding_rs::Encoding::for_label(label.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+        let (s, _, _) = enc.decode(bytes);
+        return (s.to_string(), enc.name().to_lowercase());
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return (s.to_string(), "utf-8".into());
+    }
+    // 不是合法 UTF-8：中文 Windows 上基本都是 GBK（GB18030 超集，顺手也认了）
+    let (s, _, gbk_bad) = encoding_rs::GBK.decode(bytes);
+    if !gbk_bad {
+        return (s.to_string(), "gbk".into());
+    }
+    (String::from_utf8_lossy(bytes).to_string(), "utf-8".into())
+}
+
+pub(crate) fn encode_text(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    match encoding {
+        "gbk" => {
+            let (bytes, _, bad) = encoding_rs::GBK.encode(text);
+            if bad {
+                return Err("内容里有 GBK 表示不了的字符（用 UTF-8 保存吧）".into());
+            }
+            Ok(bytes.into_owned())
+        }
+        "utf-16le" => {
+            let mut out = vec![0xFF, 0xFE];
+            for u in text.encode_utf16() {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+            Ok(out)
+        }
+        "utf-16be" => {
+            let mut out = vec![0xFE, 0xFF];
+            for u in text.encode_utf16() {
+                out.extend_from_slice(&u.to_be_bytes());
+            }
+            Ok(out)
+        }
+        _ => Ok(text.as_bytes().to_vec()),
+    }
 }
 
 pub(crate) fn shq(s: &str) -> String {
@@ -259,14 +319,19 @@ pub async fn read_dir(host: Option<String>, port: u16, path: String) -> Result<V
 }
 
 #[tauri::command]
-pub async fn read_file(host: Option<String>, port: u16, path: String) -> Result<ReadFile, String> {
+pub async fn read_file(
+    host: Option<String>,
+    port: u16,
+    path: String,
+    encoding: Option<String>,
+) -> Result<ReadFile, String> {
     match host {
         None => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
             guard_size(meta.len(), &path)?;
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-            let content = String::from_utf8(bytes).map_err(|_| "不是 UTF-8 文本文件".to_string())?;
-            Ok(ReadFile { content, mtime: mtime_ms(&meta) })
+            let (content, encoding) = decode_bytes(&bytes, encoding.as_deref());
+            Ok(ReadFile { content, mtime: mtime_ms(&meta), encoding })
         }
         Some(h) => {
             // 一次 ssh 同时拿：大小 + mtime + 内容（每次 exec 在他们那种 237ms RTT 的链路上一来一回就是 3 秒）
@@ -294,11 +359,11 @@ pub async fn read_file(host: Option<String>, port: u16, path: String) -> Result<
                 .unwrap_or("")
                 .trim_start_matches("TOOBIG")
                 .trim();
-            let content = match B64.decode(body) {
-                Ok(bytes) => String::from_utf8(bytes).map_err(|_| "不是 UTF-8 文本文件".to_string())?,
-                Err(_) => body.to_string(),
+            let (content, encoding) = match B64.decode(body) {
+                Ok(bytes) => decode_bytes(&bytes, encoding.as_deref()),
+                Err(_) => (body.to_string(), "utf-8".into()),
             };
-            Ok(ReadFile { content, mtime: mtime * 1000 })
+            Ok(ReadFile { content, mtime: mtime * 1000, encoding })
         }
     }
 }
@@ -309,17 +374,20 @@ pub async fn write_file(
     port: u16,
     path: String,
     content: String,
+    encoding: String,
 ) -> Result<u64, String> {
+    // 按打开时的编码写回去：GBK 文件写成 UTF-8 会把别人的工具搞乱
+    let bytes = encode_text(&content, &encoding)?;
     match host {
         None => {
-            std::fs::write(&path, content.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
+            std::fs::write(&path, &bytes).map_err(|e| format!("{path}: {e}"))?;
             let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
             Ok(mtime_ms(&meta))
         }
         Some(h) => {
             // 内容 base64 后跟命令一起走常驻通道，不再单开一个 ssh + stdin 管道
             let q = shq(&path);
-            let payload = crate::session::b64_encode(content.as_bytes());
+            let payload = crate::session::b64_encode(&bytes);
             let cmd = format!(
                 "printf '%s' '{payload}' | base64 -d > {q} && (stat -c %Y -- {q} 2>/dev/null || stat -f %m -- {q} 2>/dev/null || echo 0)"
             );
@@ -489,6 +557,64 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
 }
 
 /// 本地走进程内遍历；远端跑一条 grep（GPU 服务器上肯定有 grep）
+fn walk_files(root: &std::path::Path, base: &std::path::Path, max: usize, out: &mut Vec<String>) {
+    if out.len() >= max {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    for e in rd.flatten() {
+        if out.len() >= max {
+            return;
+        }
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            walk_files(&path, base, max, out);
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(base) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// 快速打开（Ctrl+P）用的文件清单，返回相对工作区的路径
+#[tauri::command]
+pub async fn list_files(
+    host: Option<String>,
+    port: u16,
+    root: String,
+    max: usize,
+) -> Result<Vec<String>, String> {
+    let max = max.clamp(100, 50000);
+    match host {
+        None => {
+            let base = std::path::PathBuf::from(&root);
+            let mut out = Vec::new();
+            walk_files(&base, &base, max, &mut out);
+            out.sort();
+            Ok(out)
+        }
+        Some(h) => {
+            let mut cmd = format!("cd {} && find . -type f", shq(&root));
+            for d in SKIP_DIRS {
+                cmd.push_str(&format!(" -not -path '*/{d}/*'"));
+            }
+            cmd.push_str(&format!(" | head -n {max} | sed 's|^\\./||'"));
+            let out = ssh_exec(&h, port, &cmd)?;
+            Ok(String::from_utf8_lossy(&out)
+                .lines()
+                .map(|l| l.trim_end_matches('\r').to_string())
+                .filter(|l| !l.is_empty())
+                .collect())
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn search(
     host: Option<String>,

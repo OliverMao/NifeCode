@@ -52,12 +52,12 @@ export interface Doc {
   readOnly: boolean;
   host: string | null; // 打开它时连的是哪台机器（切上下文也不会写错地方）
   port: number;
+  encoding: string; // 打开时的编码（utf-8 / gbk / utf-16le…），保存时按它写回
 }
 
 export class EditorHost {
   private ed: monaco.editor.IStandaloneCodeEditor;
   private docs = new Map<string, Doc>();
-
   constructor(
     el: HTMLElement,
     onDirty: (path: string, dirty: boolean) => void,
@@ -113,7 +113,7 @@ export class EditorHost {
     d.savedVersion = d.model.getAlternativeVersionId();
   }
 
-  reopen(path: string, content: string, mtime: number) {
+  reopen(path: string, content: string, mtime: number, encoding?: string) {
     const d = this.docs.get(path);
     if (!d) return this.open(path, content, mtime);
     // 保留滚动位置和光标，否则外部改动重载会像"整个编辑器被重置"
@@ -123,6 +123,7 @@ export class EditorHost {
     if (isActive && view) this.ed.restoreViewState(view);
     d.mtime = mtime;
     d.savedVersion = d.model.getAlternativeVersionId();
+    if (encoding) d.encoding = encoding;
   }
 
   setFontSize(px: number) {
@@ -133,15 +134,35 @@ export class EditorHost {
     return this.ed.getOption(monaco.editor.EditorOption.fontSize);
   }
 
-  open(path: string, content: string, mtime: number, host: string | null = null, port = 22): Doc {
+  open(
+    path: string,
+    content: string,
+    mtime: number,
+    host: string | null = null,
+    port = 22,
+    encoding = "utf-8"
+  ): Doc {
     let d = this.docs.get(path);
     if (!d) {
       const model = monaco.editor.createModel(content, languageOf(path), monaco.Uri.file(path));
-      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly: false, host, port };
+      // 默认 LF：文本里没出现过 CR 就不跟随 Windows 的 CRLF，新建文件/新行都是 LF
+      if (!content.includes("\r")) model.setEOL(monaco.editor.EndOfLineSequence.LF);
+      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly: false, host, port, encoding };
       this.docs.set(path, d);
     }
     this.show(path);
     return d;
+  }
+
+  setEncoding(path: string, encoding: string) {
+    const d = this.docs.get(path);
+    if (d) d.encoding = encoding;
+  }
+
+  /** 当前文档的换行符：LF / CRLF */
+  eolOf(path?: string): string {
+    const d = path ? this.docs.get(path) : this.current();
+    return d && d.model.getEOL() === "\r\n" ? "CRLF" : "LF";
   }
 
   show(path: string) {

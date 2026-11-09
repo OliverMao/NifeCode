@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen } from "@tauri-apps/api/event";
 
 interface PtyData { id: number; data: string } // base64
@@ -201,6 +202,7 @@ export class TerminalHost {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(termBody);
+    this.bindClipboard(term, termBody);
 
     // 连着 SSH 时新终端直接 ssh 过去（这样密码认证也能用）
     const remote = this.ssh();
@@ -228,6 +230,32 @@ export class TerminalHost {
     this.refresh(page);
     this.focus(id);
     return id;
+  }
+
+  /** 复制/粘贴：xterm 自己不管剪贴板，Ctrl+C 默认只会发 ^C */
+  private bindClipboard(term: Terminal, host: HTMLElement) {
+    // 返回 true 表示"这次按键已经被复制吃掉了"，别再当成 ^C 发给终端
+    const copy = () => {
+      const sel = term.getSelection();
+      if (sel) void writeText(sel).catch((e) => console.warn("复制失败", e));
+      return !!sel;
+    };
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey) return true;
+      const k = e.key.toLowerCase();
+      if (k === "c" && e.shiftKey) { copy(); return false; }   // Ctrl+Shift+C：强制复制
+      if (k === "c" && !e.shiftKey) return !copy();             // 有选中就复制，没选中照旧发 ^C
+      if (k === "v" && e.shiftKey) {                            // Ctrl+Shift+V：显式粘贴
+        void readText().then((t) => t && term.paste(t)).catch(() => {});
+        return false;
+      }
+      return true;
+    });
+    host.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      if (term.hasSelection()) copy();
+      else void readText().then((t) => t && term.paste(t)).catch(() => {});
+    });
   }
 
   focus(id?: number) {

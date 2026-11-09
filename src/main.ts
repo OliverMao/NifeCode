@@ -2,12 +2,13 @@ import "./style.css";
 import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
 import { TerminalHost } from "./terminal";
 
 interface Entry { name: string; path: string; is_dir: boolean }
-interface ReadFile { content: string; mtime: number }
+interface ReadFile { content: string; mtime: number; encoding: string }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -175,6 +176,51 @@ window.addEventListener("error", (e) => { lastError = String(e.message); });
 window.addEventListener("unhandledrejection", (e) => { lastError = String(e.reason); });
 
 // ---------- 状态栏 ----------
+/** 状态栏右下角的"编码 / 换行符"，跟着当前文档走 */
+function renderStatusInfo() {
+  const d = editor.current();
+  const enc = $<HTMLSpanElement>("#st-enc");
+  const eol = $<HTMLSpanElement>("#st-eol");
+  enc.textContent = d ? d.encoding.toUpperCase() : "";
+  eol.textContent = d ? editor.eolOf(d.path) : "";
+  enc.style.display = d ? "" : "none";
+  eol.style.display = d ? "" : "none";
+}
+
+/** 换编码重新读盘（有未保存改动先问） */
+async function pickEncoding() {
+  const d = editor.current();
+  if (!d) return;
+  const r = await ask("选择编码", "换编码会按新编码重新从磁盘读一遍这个文件。", [
+    { label: "UTF-8", value: "utf-8", primary: d.encoding !== "utf-8" },
+    { label: "GBK", value: "gbk", primary: d.encoding === "gbk" },
+    { label: "取消", value: "cancel" },
+  ]);
+  if (r === "cancel") return;
+  if (editor.isDirty(d)) {
+    const k = await ask("未保存的更改", `“${baseName(d.path)}” 有没保存的改动，重新读取会丢掉。`, [
+      { label: "仍然读取", value: "ok" },
+      { label: "取消", value: "no" },
+    ]);
+    if (k !== "ok") return;
+  }
+  try {
+    const res = await invoke<ReadFile>("read_file", {
+      host: d.host,
+      port: d.port,
+      path: d.path,
+      encoding: r,
+    });
+    editor.reopen(d.path, res.content, res.mtime, res.encoding);
+    editor.setEncoding(d.path, res.encoding);
+    renderTabs(d.path);
+    renderStatusInfo();
+    setMsg(`编码：${res.encoding.toUpperCase()}`);
+  } catch (e) {
+    setMsg(`读不出来：${e}`);
+  }
+}
+
 function setMsg(msg: string) {
   $<HTMLSpanElement>("#st-msg").textContent = msg;
 }
@@ -403,6 +449,7 @@ function renderTabs(activePath?: string) {
     el.onclick = () => { editor.show(p); renderTabs(p); };
     box.appendChild(el);
   }
+  renderStatusInfo();
 }
 
 // ---------- 打开 / 保存 ----------
@@ -416,7 +463,7 @@ async function openFile(path: string, line?: number) {
   try {
     const c = curCtx();
     const res = await invoke<ReadFile>("read_file", { host: c.host, port: c.port, path });
-    editor.open(path, res.content, res.mtime, c.host, c.port);
+    editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding);
     if (line) editor.revealLine(line);
     renderTabs(path);
     $<HTMLSpanElement>("#st-msg").textContent = path;
@@ -435,6 +482,7 @@ async function savePath(path: string) {
       port: doc.port,
       path,
       content: doc.model.getValue(),
+      encoding: doc.encoding,
     });
     editor.markSaved(path, mtime);
     renderTabs(path);
@@ -645,6 +693,7 @@ async function refreshTree() {
   await renderTree(root, $("#tree"), 0, true);
   if (active) document.querySelector<HTMLElement>(`.node[data-path="${CSS.escape(active)}"]`)?.classList.add("active");
   treeSig = "";
+  fileCache = null;
 }
 
 /** 只 stat 一次，变了就重画：本地 1.5s / 远端 5s 一次 */
@@ -1399,7 +1448,41 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (e.ctrlKey && e.shiftKey && (e.key === "P" || e.key === "p")) {
       e.preventDefault();
       void showCommandPalette();
+      return;
     }
+    if (e.ctrlKey && !e.shiftKey && (e.key === "p" || e.key === "P")) {
+      e.preventDefault();
+      void quickOpen();
+      return;
+    }
+    // 焦点不在编辑器里时 Monaco 收不到 Ctrl+S，这里补一下（在编辑器里就让它自己存，别存两次）
+    if (e.ctrlKey && !e.shiftKey && (e.key === "s" || e.key === "S")) {
+      const t = e.target as HTMLElement | null;
+      if (t && typeof t.closest === "function" && t.closest("#editor")) return;
+      e.preventDefault();
+      void saveCurrent();
+    }
+  });
+
+  $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
+
+  // 关窗前把没保存的改动问一遍，别直接丢
+  await getCurrentWindow().onCloseRequested(async (ev) => {
+    const dirty = editor.dirtyPaths();
+    if (!dirty.length) return;
+    ev.preventDefault();
+    const names = dirty.map(baseName).join("、");
+    const r = await ask("未保存的更改", `这些文件还没保存：${names}`, [
+      { label: "全部保存并关闭", value: "save", primary: true },
+      { label: "不保存", value: "discard" },
+      { label: "取消", value: "cancel" },
+    ]);
+    if (r === "cancel") return;
+    if (r === "save") {
+      for (const p of dirty) await savePath(p);
+      if (editor.dirtyPaths().length) { setMsg("还有文件没存成功，先不关"); return; }
+    }
+    await getCurrentWindow().destroy();
   });
 
   document.addEventListener("mousedown", (e) => {
@@ -1478,9 +1561,11 @@ async function openDiff(path: string, oldText: string, newText: string, opts: { 
 
   const done = () => { diff.dispose(); m1.dispose(); m2.dispose(); host_.remove(); };
   ok.onclick = async () => {
-    await invoke("write_file", { ...connArg(), path, content: newText }).catch((e) => setMsg(`写入失败：${e}`));
+    // 按已打开文档的编码写回；文件本身没打开就按 UTF-8（Agent 给的也是 UTF-8 文本）
+    const enc = editor.docsFor(path)?.encoding ?? "utf-8";
+    await invoke("write_file", { ...connArg(), path, content: newText, encoding: enc }).catch((e) => setMsg(`写入失败：${e}`));
     await invoke<ReadFile>("read_file", { ...connArg(), path }).then((res) => {
-      editor.reopen(path, res.content, res.mtime);
+      editor.reopen(path, res.content, res.mtime, res.encoding);
     }).catch(() => {});
     renderTabs(path);
     setMsg(`已应用 Agent 修改：${baseName(path)}`);
@@ -1491,6 +1576,103 @@ async function openDiff(path: string, oldText: string, newText: string, opts: { 
 }
 
 // ---------- 命令面板（最小版）----------
+// ---------- Ctrl+P 快速打开 ----------
+let fileCache: { key: string; list: string[] } | null = null;
+
+async function listFiles(): Promise<string[]> {
+  const c = curCtx();
+  const key = `${c.host ?? ""}|${c.root}`;
+  if (fileCache?.key === key) return fileCache.list;
+  const list = await invoke<string[]>("list_files", { host: c.host, port: c.port, root: c.root, max: 20000 });
+  fileCache = { key, list };
+  return list;
+}
+
+/** 子序列模糊匹配：先比文件名，再比整条路径 */
+function fuzzyScore(path: string, q: string): number {
+  const base = baseName(path).toLowerCase();
+  const p = path.toLowerCase();
+  if (!q) return 1;
+  const i = base.indexOf(q);
+  if (i === 0) return 100;
+  if (i > 0) return 60;
+  if (p.includes(q)) return 30;
+  let k = 0;
+  for (const ch of p) if (ch === q[k]) k++;
+  return k === q.length ? 10 : 0;
+}
+
+async function quickOpen() {
+  if (!root) { setMsg("先打开一个文件夹"); return; }
+  setMsg("正在收集文件…");
+  let all: string[];
+  try {
+    all = await listFiles();
+  } catch (e) {
+    setMsg(`列不出文件：${e}`);
+    return;
+  }
+  const m = $("#modal");
+  m.querySelector(".title")!.textContent = `快速打开（${all.length} 个文件）`;
+  const body = m.querySelector(".body") as HTMLDivElement;
+  body.innerHTML = `<div class="pk-path"><input id="qo-input" spellcheck="false" placeholder="输入文件名或路径片段…" /></div><div id="qo-list" class="pk-list"></div>`;
+  (m.querySelector(".actions") as HTMLDivElement).innerHTML = "";
+  m.classList.remove("hidden");
+  const input = $<HTMLInputElement>("#qo-input");
+  const box = $<HTMLDivElement>("#qo-list");
+  input.focus();
+  let rows: string[] = [];
+  let sel = 0;
+
+  const paint = () => {
+    box.innerHTML = "";
+    if (!rows.length) {
+      box.innerHTML = `<div class="pk-empty">没匹配到</div>`;
+      return;
+    }
+    rows.forEach((p, i) => {
+      const row = document.createElement("div");
+      row.className = "pk-row" + (i === sel ? " sel" : "");
+      row.innerHTML = `<span class="ico">${iconSvg(iconFor(baseName(p), false, false))}</span><span class="name"></span>`;
+      row.querySelector(".name")!.textContent = p;
+      row.onmousedown = (ev) => { ev.preventDefault(); sel = i; void pick(); };
+      box.appendChild(row);
+    });
+    (box.children[sel] as HTMLElement | undefined)?.scrollIntoView({ block: "nearest" });
+  };
+  const refresh = () => {
+    const q = input.value.trim().toLowerCase();
+    rows = all
+      .map((p) => [p, fuzzyScore(p, q)] as [string, number])
+      .filter(([, s]) => s > 0)
+      .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))
+      .slice(0, 200)
+      .map(([p]) => p);
+    sel = 0;
+    paint();
+  };
+  const pick = async () => {
+    const p = rows[sel];
+    closeModal();
+    if (!p) return;
+    await openFile(joinPath(root!, p));
+  };
+  input.oninput = refresh;
+  input.onkeydown = (e) => {
+    if (e.key === "Escape") { closeModal(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!rows.length) return;
+      sel = (sel + (e.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+      paint();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      void pick();
+    }
+  };
+  refresh();
+}
+
 async function showCommandPalette() {
   const r = await ask(
     "命令面板",

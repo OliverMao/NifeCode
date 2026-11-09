@@ -42,6 +42,7 @@ pub fn run() {
             fsops::fs_delete,
             fsops::fs_copy,
             fsops::fs_reveal,
+            fsops::list_files,
             fsops::ssh_save_password,
             fsops::ssh_forget_password,
             fsops::ssh_has_password,

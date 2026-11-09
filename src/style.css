@@ -315,7 +315,8 @@ body {
   display: flex; align-items: center; gap: 6px; padding: 4px 6px;
   border-radius: 3px; cursor: pointer;
 }
-.pk-row:hover { background: var(--hover); }
+.pk-row:hover, .pk-row.sel { background: var(--hover); }
+.pk-row .hit { color: #4ea1ff; }
 .pk-row .ico { width: calc(var(--ui) + 3px); display: flex; justify-content: center; flex: none; }
 .pk-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pk-empty { color: var(--fg-dim); padding: 8px 6px; }
