@@ -43,6 +43,7 @@ export class TerminalHost {
   private started = false;
   private seqPage = 0;
   private addBtn: HTMLButtonElement;
+  private fontPx = 13; // 新开的终端也要用当前字号
 
   constructor(
     private body: HTMLElement,   // #terms
@@ -189,7 +190,7 @@ export class TerminalHost {
     page.el.appendChild(el);
 
     const term = new Terminal({
-      fontSize: 13,
+      fontSize: this.fontPx,
       fontFamily: 'Consolas, "Cascadia Mono", "Microsoft YaHei Mono", monospace',
       cursorBlink: true,
       theme: { background: "#1e1e1e", foreground: "#cccccc", cursor: "#cccccc" },
@@ -361,6 +362,16 @@ export class TerminalHost {
       p.rows = p.term.rows;
       void invoke("pty_resize", { id: p.id, cols: p.cols, rows: p.rows }).catch(() => {});
     }, 80);
+  }
+
+  setFontSize(px: number) {
+    this.fontPx = px;
+    for (const page of this.pages) {
+      for (const p of page.panes) {
+        p.term.options.fontSize = px;
+        this.fitPane(p);
+      }
+    }
   }
 
   fitAll() {

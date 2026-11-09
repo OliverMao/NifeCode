@@ -206,6 +206,23 @@ function ask(title: string, bodyHTML: string, buttons: Btn[]): Promise<string> {
 function closeModal() { $("#modal").classList.add("hidden"); }
 
 // ---------- 编辑器 ----------
+// ---------- 字号缩放（Ctrl+= / Ctrl+- / Ctrl+0）----------
+const FONT_KEY = "font-size";
+const FONT_DEFAULT = 13;
+let fontSize = Number(localStorage.getItem(FONT_KEY)) || FONT_DEFAULT;
+
+function applyFontSize(px: number) {
+  fontSize = Math.max(9, Math.min(28, Math.round(px)));
+  localStorage.setItem(FONT_KEY, String(fontSize));
+  editor.setFontSize(fontSize);
+  terms.setFontSize(fontSize);
+  setMsg(`字号 ${fontSize}px`);
+}
+
+function bumpFont(d: number | "reset") {
+  applyFontSize(d === "reset" ? FONT_DEFAULT : fontSize + d);
+}
+
 const editor = new EditorHost(
   $("#editor"),
   (path, dirty) => markTabDirty(path, dirty),
@@ -1130,6 +1147,7 @@ async function boot() {
   applyActive();
   renderCtxBar();
   if (root) void renderTree(root, $("#tree"), 0);
+  applyFontSize(fontSize);
   void loadShells();
   if (terms.count() === 0) void terms.newPage(true);
 
@@ -1211,6 +1229,14 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (e.key === "Escape") hideMenu();
     if (e.key === "Escape") closeModal();
   });
+
+  // 缩放放在捕获阶段：编辑器聚焦时 Monaco 会先把按键吃掉，捕获能保证我们先处理
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    if (e.key === "=" || e.key === "+") { e.preventDefault(); e.stopPropagation(); bumpFont(1); }
+    else if (e.key === "-" || e.key === "_") { e.preventDefault(); e.stopPropagation(); bumpFont(-1); }
+    else if (e.key === "0") { e.preventDefault(); e.stopPropagation(); bumpFont("reset"); }
+  }, true);
 
   await listen<{ path: string; line?: number }>("bridge:open", (e) => { void openFile(e.payload.path, e.payload.line); });
   await listen<{ path: string }>("bridge:workspace", (e) => { host = null; setConnLabel(); void openRoot(e.payload.path); });

@@ -58,7 +58,12 @@ export class EditorHost {
   private ed: monaco.editor.IStandaloneCodeEditor;
   private docs = new Map<string, Doc>();
 
-  constructor(el: HTMLElement, onDirty: (path: string, dirty: boolean) => void, onCursor: (line: number, col: number) => void, onSave: () => void) {
+  constructor(
+    el: HTMLElement,
+    onDirty: (path: string, dirty: boolean) => void,
+    onCursor: (line: number, col: number) => void,
+    onSave: () => void,
+  ) {
     this.ed = monaco.editor.create(el, {
       theme: "vs-dark",
       automaticLayout: true,
@@ -118,6 +123,14 @@ export class EditorHost {
     if (isActive && view) this.ed.restoreViewState(view);
     d.mtime = mtime;
     d.savedVersion = d.model.getAlternativeVersionId();
+  }
+
+  setFontSize(px: number) {
+    this.ed.updateOptions({ fontSize: px, lineHeight: Math.round(px * 1.5) });
+  }
+
+  fontSize(): number {
+    return this.ed.getOption(monaco.editor.EditorOption.fontSize);
   }
 
   open(path: string, content: string, mtime: number, host: string | null = null, port = 22): Doc {
