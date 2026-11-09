@@ -1962,6 +1962,10 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   $<HTMLButtonElement>("#brand").onclick = (ev) => {
     ev.stopPropagation();
+    if (!$("#ctxmenu").classList.contains("hidden")) {
+      hideMenu();
+      return;
+    }
     const r = $<HTMLButtonElement>("#brand").getBoundingClientRect();
     $("#brand").classList.add("open");
     showMenu(r.left, r.bottom + 2, mainMenu());
@@ -1991,10 +1995,22 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     await getCurrentWindow().destroy();
   });
 
-  document.addEventListener("mousedown", (e) => {
-    const t = e.target as HTMLElement | null;
-    if (!t || typeof t.closest !== "function" || !t.closest("#ctxmenu")) hideMenu();
-  });
+  // 捕获阶段：Monaco / xterm 会在自己的 mousedown 里 stopPropagation，
+  // 挂在冒泡阶段的话，点编辑器或终端里的东西菜单就关不掉（只能按 Esc）
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      const m = $("#ctxmenu");
+      if (m.classList.contains("hidden")) return;
+      const t = e.target as HTMLElement | null;
+      if (!t || typeof t.closest !== "function") return hideMenu();
+      if (t.closest("#brand")) return; // 品牌名自己按开关处理，见下面的 onclick
+      if (!t.closest("#ctxmenu")) hideMenu();
+    },
+    true
+  );
+  // 点别的窗口/Alt+Tab 回来也别留着菜单
+  window.addEventListener("blur", () => hideMenu());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") hideMenu();
     if (e.key === "Escape") closeModal();
