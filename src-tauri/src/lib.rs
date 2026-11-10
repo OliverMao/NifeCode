@@ -56,6 +56,8 @@ pub fn run() {
             fsops::list_files,
             fsops::replace_all,
             fsops::read_binary,
+            fsops::fs_open,
+            fsops::ssh_forget_host,
             cache::app_cache_size,
             cache::app_cache_clear,
             fsops::ssh_save_password,

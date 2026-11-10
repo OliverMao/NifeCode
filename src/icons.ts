@@ -32,6 +32,11 @@ const GLYPH: Record<string, Glyph> = {
     extra: '<circle cx="10.3" cy="5.9" r=".9"/>',
   },
   box: { d: "M2.6 5.4h10.8v7.1H2.6zM2.6 5.4 4.2 2.6h7.6l1.6 2.8M8 5.4v7.1" },
+  // 幻灯"屏幕"：一块板 + 前面一支笔
+  presentation: {
+    d: "M2.4 3h11.2v7.2H2.4zM8 10.2v2.4M5.6 13.4h4.8",
+    extra: '<path d="M5.4 8V5.2h5.2V8" opacity=".7"/>',
+  },
   lock: { d: "M5.3 7V5.4a2.7 2.7 0 0 1 5.4 0V7M3.8 7h8.4v6.3H3.8z" },
   data: {
     d: "M3.5 4.5v7c0 1.05 2 1.9 4.5 1.9s4.5-.85 4.5-1.9v-7",
@@ -84,6 +89,8 @@ const BY_EXT: Record<string, [string, string]> = {
   xz: ["box", "#cc8b3e"], zst: ["box", "#cc8b3e"], whl: ["box", "#cc8b3e"], "7z": ["box", "#cc8b3e"],
   rar: ["box", "#cc8b3e"], msi: ["box", "#8b949e"], exe: ["box", "#8b949e"], deb: ["box", "#cc8b3e"],
   csv: ["data", "#4ec9b0"], xlsx: ["data", "#4ec9b0"], sql: ["data", "#4ec9b0"],
+  docx: ["book", "#4f7ec4"], doc: ["book", "#4f7ec4"],
+  pptx: ["presentation", "#d2694a"], ppt: ["presentation", "#d2694a"],
   db: ["data", "#4ec9b0"], sqlite: ["data", "#4ec9b0"],
   lock: ["lock", "#d4b34a"], env: ["key", "#d4b34a"], pem: ["key", "#d4b34a"], key: ["key", "#d4b34a"],
   crt: ["key", "#d4b34a"], pub: ["key", "#d4b34a"],

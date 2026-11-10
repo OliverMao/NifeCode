@@ -19,6 +19,20 @@ pub struct ReadFile {
     pub mtime: u64,
     pub encoding: String, // 猜出来的编码，保存时按它写回去
     pub huge: bool,       // 大于 8MB：前端以只读方式打开
+    pub binary: bool,     // 看起来是二进制：前端要像 VS Code 那样问一句"仍然打开吗"
+}
+
+/// 像不像二进制：开头 8KB 里有 NUL，或者控制字符超过 10%（GBK/UTF-8 的高位字节不算）
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.contains(&0) {
+        return true;
+    }
+    let bad = head
+        .iter()
+        .filter(|b| **b < 0x09 || (**b > 0x0d && **b < 0x20) || **b == 0x7f)
+        .count();
+    !head.is_empty() && bad * 10 > head.len()
 }
 
 /// 文本解码。forced 是用户手动指定的编码（重新打开时用）
@@ -92,8 +106,18 @@ fn mtime_ms(m: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-// 当前连接用的私钥（可选，-i）；GPU 服务器常需要指定 key
-static IDENTITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+// 每台机器用的私钥（可选，-i）。必须按「主机+端口」分开存：
+// 同一个 IP 不同端口可能是两台机器（端口转发），各自一把 key，共用一个全局值就会拿错钥匙
+static IDENTITY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+fn identities() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    IDENTITY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn ident_key(target: &str, port: u16) -> String {
+    format!("{}:{}", target.to_lowercase(), port)
+}
 
 /// 断开连接时把常驻通道里的 ssh 进程收掉
 #[tauri::command]
@@ -102,12 +126,47 @@ pub async fn ssh_close() {
 }
 
 #[tauri::command]
-pub fn ssh_set_identity(key: Option<String>) {
-    *IDENTITY.lock().unwrap() = key.filter(|k| !k.trim().is_empty());
+pub fn ssh_set_identity(target: String, port: u16, key: Option<String>) {
+    let slot = ident_key(&target, port);
+    let mut g = identities().lock().unwrap();
+    match key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => {
+            g.insert(slot, k);
+        }
+        None => {
+            g.remove(&slot);
+        }
+    }
 }
 
-pub(crate) fn current_identity() -> Option<String> {
-    IDENTITY.lock().unwrap().clone()
+pub(crate) fn current_identity(target: &str, port: u16) -> Option<String> {
+    identities().lock().unwrap().get(&ident_key(target, port)).cloned()
+}
+
+/// 删掉 known_hosts 里 host:port 那一条（同 IP 不同端口、或机器重装后密钥变了，
+/// ssh 会报 "REMOTE HOST IDENTIFICATION HAS CHANGED" 直接拒绝连接）
+#[tauri::command]
+pub fn ssh_forget_host(target: String, port: u16) -> Result<(), String> {
+    let host = if port == 22 { target.clone() } else { format!("[{target}]:{port}") };
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).map_err(|_| "找不到 HOME 目录")?;
+    let kh = std::path::PathBuf::from(home).join(".ssh").join("known_hosts");
+    if !kh.exists() {
+        return Ok(()); // 没有记录，本来就不该冲突
+    }
+    let mut c = Command::new("ssh-keygen");
+    crate::proc::hide_console(&mut c);
+    // -R 既能删明文条目，也能删 hashed 条目（HashKnownHosts 开着时）
+    let out = c
+        .arg("-R")
+        .arg(&host)
+        .arg("-f")
+        .arg(&kh)
+        .output()
+        .map_err(|e| format!("调不到 ssh-keygen：{e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 // ---------- 密码：存 Windows 凭据管理器（DPAPI 保护），不落 localStorage ----------
@@ -181,7 +240,7 @@ fn ssh_args(target: &str, port: u16) -> Vec<String> {
     if !has_pw {
         v.insert(0, "-o".into());
         v.insert(1, "BatchMode=yes".into());
-    } else if current_identity().is_none() {
+    } else if current_identity(target, port).is_none() {
         // 只存了密码、没配私钥：别再去探测 publickey，省一个往返（2.2s → 1.8s）
         v.push("-o".into());
         v.push("PreferredAuthentications=password,keyboard-interactive".into());
@@ -201,7 +260,7 @@ fn ssh_args(target: &str, port: u16) -> Vec<String> {
             v.push("ControlPersist=120".into());
         }
     }
-    if let Some(key) = current_identity() {
+    if let Some(key) = current_identity(target, port) {
         v.push("-i".into());
         v.push(key);
     }
@@ -334,7 +393,9 @@ pub async fn read_file(
             let huge = guard_size(meta.len(), &path)?;
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             let (content, encoding) = decode_bytes(&bytes, encoding.as_deref());
-            Ok(ReadFile { content, mtime: mtime_ms(&meta), encoding, huge })
+            // 带 BOM 的 UTF-16 里天然有 NUL，别误判成二进制
+            let binary = !encoding.starts_with("utf-16") && looks_binary(&bytes);
+            Ok(ReadFile { content, mtime: mtime_ms(&meta), encoding, huge, binary })
         }
         Some(h) => {
             // 一次 ssh 同时拿：大小 + mtime + 内容（每次 exec 在他们那种 237ms RTT 的链路上一来一回就是 3 秒）
@@ -362,13 +423,37 @@ pub async fn read_file(
                 .unwrap_or("")
                 .trim_start_matches("TOOBIG")
                 .trim();
-            let (content, encoding) = match B64.decode(body) {
-                Ok(bytes) => decode_bytes(&bytes, encoding.as_deref()),
-                Err(_) => (body.to_string(), "utf-8".into()),
+            let bytes = B64.decode(body).ok();
+            let (content, encoding) = match &bytes {
+                Some(b) => decode_bytes(b, encoding.as_deref()),
+                None => (body.to_string(), "utf-8".into()),
             };
-            Ok(ReadFile { content, mtime: mtime * 1000, encoding, huge })
+            let binary = !encoding.starts_with("utf-16") && bytes.as_deref().is_some_and(looks_binary);
+            Ok(ReadFile { content, mtime: mtime * 1000, encoding, huge, binary })
         }
     }
+}
+
+/// 用系统默认程序打开（本机才有）
+#[tauri::command]
+pub fn fs_open(path: String) -> Result<(), String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("路径不存在：{path}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -648,7 +733,7 @@ pub async fn read_binary(host: Option<String>, port: u16, path: String) -> Resul
         None => {
             let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
             if meta.len() > LIMIT {
-                return Err(format!("图片 {} MB，太大了", meta.len() / 1024 / 1024));
+                return Err(format!("{} MB，超过 32MB 预览上限", meta.len() / 1024 / 1024));
             }
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             Ok(B64.encode(bytes))
@@ -661,7 +746,7 @@ pub async fn read_binary(host: Option<String>, port: u16, path: String) -> Resul
             let raw = ssh_exec(&h, port, &cmd)?;
             let text = String::from_utf8_lossy(&raw).trim().to_string();
             if text == "TOOBIG" {
-                return Err("图片太大".into());
+                return Err("超过 32MB 预览上限".into());
             }
             Ok(text.replace(['\n', '\r'], ""))
         }

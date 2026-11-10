@@ -35,7 +35,7 @@ pub async fn fwd_start(
         "-o".into(), "ExitOnForwardFailure=yes".into(),
         "-o".into(), "ServerAliveInterval=30".into(),
     ];
-    if let Some(key) = crate::fsops::current_identity() {
+    if let Some(key) = crate::fsops::current_identity(&target, port) {
         args.push("-i".into());
         args.push(key);
     }

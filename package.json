@@ -1,7 +1,7 @@
 {
   "name": "nifecode",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -14,8 +14,11 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.5.0",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^5.5.0",
-    "monaco-editor": "^0.52.2"
+    "docx-preview": "0.4.1",
+    "monaco-editor": "^0.52.2",
+    "pptx-preview": "1.0.7"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0",

@@ -39,6 +39,15 @@ Windows 下 release 版常驻内存实测：**175MB**（编辑器 + 文件树 + 
 - **终端内查找**：终端里 `Ctrl+F` 弹出小查找条（`↑`/`↓`/Enter 下一个/Shift+Enter 上一个，Esc 关闭）；有不认识的高度限制就不会顶乱终端布局
 - **图片预览**：点 `.png/.jpg/.gif/.webp/.bmp/.ico/.svg` 直接看图（带尺寸和 KB 数，本地/远端都行），不占编辑器标签
 - **超大文件**：超过 8MB 也能打开，但**以只读方式**（状态栏会提示），避免一键把 100MB 日志拖进来卡死；96MB 以上才拒绝
+- **Word / PowerPoint 真渲染**：点 `.docx` / `.pptx` 直接在编辑器区看原样排版（Word 的段落/表格/图片/页眉页脚、
+  PPT 的每张幻灯片），本地和 SSH 远端都行。用的是 `docx-preview`(Apache-2.0) 和 `pptx-preview`(ISC)，
+  **两个库都是按需 `import()`**：不开 office 文件一行都不加载，主包不受影响
+  - 页面按真实宽度渲染 → 中栏放不下就按比例缩到刚好放下（换窗口大小会重新算），跟 Word 的"适应窗口"一样
+  - **关预览即释放**：`viewer.destroy()` + 删 DOM + `useBase64URL` 不留 blob URL，反复开关同一份 pptx 实测不累积（1359→1356→1357 MB）
+  - 代价：首次打开 pptx 后 ~20MB 常驻（那 1.2MB 库和它的运行时，文档内容不在里面）；docx 关掉直接回基线
+  - 老版 `.doc` / `.ppt` 是二进制格式，只有系统程序能读 → 弹窗一键「用系统程序打开」
+- **二进制文件**：像 VS Code 一样先弹一句「无法在编辑器中显示」，「取消」不开、「仍然打开」以**只读**方式摊开乱码，
+  不会因为手滑保存把 exe/图片写坏。判断方式是开头 8KB 有 NUL 或控制字符超 10%（带 BOM 的 UTF-16 不算）
 - **未保存内容能扛崩溃**：每秒级把没保存的内容快照到 localStorage，崩溃/断电/被强杀后再启动会问“要不要恢复这几个文件”；正常存盘或关标签后快照自动清掉
 - **SSH 标签重启还原**：上次连着的机器和打开的远端目录都会恢复成标签（灰色“未连接”），点一下用保存的配置重连并回到原目录；没连上之前不会后台偷偷反复握手动它的文件
 - **端口转发**：把 GPU 服务器上的 Jupyter / TensorBoard 映射到本地（命令面板 → 端口转发，或状态栏点转发标记停止）
@@ -167,7 +176,12 @@ node scripts/make-icon.mjs   # 改完重跑，再 pnpm tauri build 才会进 exe
 3. **失败会重试两遍** → 通道失败后回落成一次性 ssh，等于把认证又走一遍（慢一倍，还可能触发服务器 fail2ban）。现在认证类错误（`Permission denied` / host key）直接返回，而且 `NumberOfPasswordPrompts=1`
 
 超时也都设了：`ConnectTimeout=8`、`ServerAliveInterval=5`×3、前端 20 秒兜底。
-- 私钥路径填了就用 `-i`，留空走 ssh-agent / 默认密钥
+- 私钥路径填了就用 `-i`，留空走 ssh-agent / 默认密钥。**私钥按「主机:端口」分开记**：
+  同一个 IP 不同端口常常是端口转发出来的两台机器，各用各的 key，切项目、关标签都不会把另一台的钥匙顶掉
+- 同一个 IP 换端口后若撞上 known_hosts 里的旧记录（机器重装/端口重新映射），ssh 会报
+  `Host key verification failed` / `REMOTE HOST IDENTIFICATION HAS CHANGED` 直接拒连。
+  这时 NifeCode 会问一句「删掉 `[host]:port` 这条记录后重连吗」——只删这一条（走 `ssh-keygen -R`，hashed 的也能删），
+  连上去自动记新密钥（`StrictHostKeyChecking=accept-new`）
 
 ### 连上之后换目录
 

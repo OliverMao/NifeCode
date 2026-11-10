@@ -156,7 +156,7 @@ pub fn pty_open(
             c.arg(t.port.to_string());
             c.arg("-o");
             c.arg("ServerAliveInterval=30");
-            if let Some(key) = crate::fsops::current_identity() {
+            if let Some(key) = crate::fsops::current_identity(&t.target, t.port) {
                 c.arg("-i");
                 c.arg(key);
             }

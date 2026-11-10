@@ -11,7 +11,7 @@ import { EditorHost } from "./editor";
 import { TerminalHost } from "./terminal";
 
 interface Entry { name: string; path: string; is_dir: boolean }
-interface ReadFile { content: string; mtime: number; encoding: string; huge?: boolean }
+interface ReadFile { content: string; mtime: number; encoding: string; huge?: boolean; binary?: boolean }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -230,7 +230,7 @@ function switchContext(id: string) {
   const prof = contexts.some((c) => c.id === id && c.kind === "ssh")
     ? sshProfiles().find((p) => `ssh:${p.id}` === id)
     : undefined;
-  if (prof) void invoke("ssh_set_identity", { key: prof.key ?? null }).catch(() => {});
+  if (prof) void invoke("ssh_set_identity", { target: prof.target, port: prof.port, key: prof.key ?? null }).catch(() => {});
   renderCtxBar();
   setConnLabel();
   renderSsh();
@@ -316,7 +316,10 @@ async function closeContext(id: string, keepSession = false) {
   if (!keepSession) {
     await invoke("ssh_close").catch(() => {});
     await invoke("fwd_stop_all").catch(() => {});
-    void invoke("ssh_set_identity", { key: null }).catch(() => {});
+    // 只清这台机器（host+port）的私钥绑定，别的 SSH 标签不受影响
+    if (c.kind === "ssh" && c.host) {
+      void invoke("ssh_set_identity", { target: c.host, port: c.port ?? 22, key: null }).catch(() => {});
+    }
   }
   contexts.splice(contexts.indexOf(c), 1);
   if (activeId === id) {
@@ -967,7 +970,10 @@ function markTabDirty(path: string, dirty: boolean) {
 function renderTabs(activePath?: string) {
   const box = $("#tabs");
   box.innerHTML = "";
-  if ((activePath ?? editor.current()?.path) && document.getElementById("img-view")) closeImage();
+  if (activePath ?? editor.current()?.path) {
+    closeImage();
+    closeDoc(); // 切标签就别让文档预览继续盖着
+  }
   const cur = activePath ?? editor.current()?.path;
   for (const p of editor.paths()) {
     const el = document.createElement("div");
@@ -1018,6 +1024,8 @@ function renderTabs(activePath?: string) {
 
 // ---------- 打开 / 保存 ----------
 const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
+// docx/pptx 走纯文字预览；doc/ppt 是老二进制格式，只能甩给系统程序
+const DOC_EXT = ["docx", "pptx", "doc", "ppt"];
 
 async function openFile(path: string, line?: number) {
   if (editor.has(path)) {
@@ -1031,14 +1039,35 @@ async function openFile(path: string, line?: number) {
     await openImage(path, ext);
     return;
   }
+  if (DOC_EXT.includes(ext)) {
+    await openDoc(path, ext);
+    return;
+  }
   try {
     const c = curCtx();
     const res = await invoke<ReadFile>("read_file", { host: c.host, port: c.port, path });
-    const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge);
-    if (res.huge) setMsg(`${baseName(path)} 超过 8MB，已只读打开`);
+    if (res.binary) {
+      // 跟 VS Code 一样先问一句：直接摊开是一屏乱码，保存还会把原文件写坏
+      const yes = await ask(
+        "无法在编辑器中显示",
+        `「<b>${baseName(path)}</b>」是二进制文件，或者用了不受支持的编码。<br>` +
+          `强行打开只会看到乱码，保存也会破坏原文件，所以打开后是只读的。`,
+        [
+          { label: "取消", value: "no" },
+          { label: "仍然打开", value: "ok", primary: true },
+        ]
+      );
+      if (yes !== "ok") {
+        setMsg(`已取消打开 ${baseName(path)}`);
+        return;
+      }
+    }
+    const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge || !!res.binary);
+    if (res.binary) setMsg(`${baseName(path)} 是二进制文件，已只读打开`);
+    else if (res.huge) setMsg(`${baseName(path)} 超过 8MB，已只读打开`);
     if (line) editor.revealLine(line);
     renderTabs(path);
-    if (!res.huge) $<HTMLSpanElement>("#st-msg").textContent = path;
+    if (!res.huge && !res.binary) $<HTMLSpanElement>("#st-msg").textContent = path;
     void d;
   } catch (e) {
     lastError = `open ${path}: ${e}`;
@@ -1071,6 +1100,121 @@ async function openImage(path: string, ext: string) {
 
 function closeImage() {
   document.getElementById("img-view")?.remove();
+}
+
+/** Word / PowerPoint：真渲染（docx-preview / pptx-preview），关掉时 destroy + 删 DOM，内存当场还回去 */
+let docViewer: { destroy(): void } | null = null;
+// 页面按真实宽度渲染（docx 800px 上下、pptx 960px），中栏往往没这么宽 → 按比例缩到刚好放下
+let docZoomEl: HTMLElement | null = null;
+let docNaturalW = 0;
+
+function fitDoc() {
+  if (!docZoomEl) return;
+  const bd = docZoomEl.parentElement;
+  const avail = (bd?.clientWidth ?? 800) - 24;
+  if (avail <= 0 || !docNaturalW) return;
+  docZoomEl.style.zoom = String(Math.min(1, avail / docNaturalW));
+}
+
+function b64ToBuffer(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+}
+
+async function openDoc(path: string, ext: string) {
+  if (ext === "doc" || ext === "ppt") {
+    const go = await ask(
+      "无法预览这种格式",
+      `「<b>${baseName(path)}</b>」是老版 .${ext} 二进制格式，只有 .docx / .pptx 能预览。<br>` +
+        `要现在用系统程序打开吗？`,
+      [
+        { label: "取消", value: "no" },
+        { label: "用系统程序打开", value: "ok", primary: true },
+      ]
+    );
+    if (go === "ok") openExternal(path);
+    return;
+  }
+  const c = curCtx();
+  setMsg(`正在解析 ${baseName(path)}…`);
+  closeDoc();
+  const box = document.createElement("div");
+  box.id = "doc-view";
+  box.className = ext === "docx" ? "word" : "ppt";
+  box.innerHTML = `<div class="hd"><span class="nm"></span><span class="spacer"></span><span class="sz"></span><span class="x" title="关闭（Esc）">✕</span></div><div class="bd"></div>`;
+  const nm = box.querySelector(".nm") as HTMLElement;
+  nm.textContent = baseName(path);
+  nm.title = path;
+  const sz = box.querySelector(".sz") as HTMLElement;
+  const bd = box.querySelector(".bd") as HTMLElement;
+  (box.querySelector(".x") as HTMLElement).onclick = closeDoc;
+  $("#editor").parentElement!.appendChild(box);
+  try {
+    const b64 = await invoke<string>("read_binary", { host: c.host, port: c.port, path });
+    const buf = b64ToBuffer(b64);
+    if (ext === "docx") {
+      // 两个库都按需 import：不开 office 文件就一行都不加载
+      const { renderAsync } = await import("docx-preview");
+      await renderAsync(buf, bd, bd, {
+        className: "docx",
+        inWrapper: true,
+        breakPages: true,
+        ignoreLastRenderedPageBreak: true,
+        renderHeaders: true,
+        renderFooters: true,
+        renderFootnotes: true,
+        useBase64URL: true, // 图片内联成 base64，不留 blob URL，关掉就真没了
+      });
+      const pages = bd.querySelectorAll("section.docx").length;
+      sz.textContent = pages ? `${pages} 页` : "";
+      docZoomEl = bd.querySelector(".docx-wrapper") as HTMLElement | null;
+    } else {
+      const { init } = await import("pptx-preview");
+      const viewer = init(bd, { width: 960, height: 540, mode: "list" });
+      docViewer = viewer; // 关的时候靠它 destroy：canvas / echarts 实例都由库自己收
+      await viewer.preview(buf);
+      sz.textContent = `${viewer.slideCount} 张幻灯片`;
+      // 库默认把 wrapper 钉成一张幻灯片高、内部滚动；改成不限高，让所有页顺着往下排
+      const wrap = bd.querySelector(".pptx-preview-wrapper") as HTMLElement | null;
+      if (wrap) {
+        wrap.style.height = "auto";
+        wrap.style.overflowY = "visible";
+      }
+      docZoomEl = wrap ?? (bd.firstElementChild as HTMLElement | null);
+    }
+    if (docZoomEl) {
+      docZoomEl.style.zoom = "1";
+      docNaturalW = (docZoomEl.firstElementChild as HTMLElement)?.offsetWidth || docZoomEl.offsetWidth;
+      fitDoc();
+      window.addEventListener("resize", fitDoc);
+    }
+    setMsg(`${baseName(path)} · ${sz.textContent}`);
+  } catch (e) {
+    lastError = `office ${path}: ${e}`;
+    sz.textContent = "预览失败";
+    bd.textContent = `${e}`;
+    setMsg(`预览失败：${e}`);
+  }
+}
+
+function closeDoc() {
+  window.removeEventListener("resize", fitDoc);
+  docViewer?.destroy();
+  docViewer = null;
+  docZoomEl = null;
+  docNaturalW = 0;
+  document.getElementById("doc-view")?.remove();
+}
+
+/** 甩给系统默认程序（Word / WPS / PowerPoint…），NifeCode 自己不占内存 */
+function openExternal(path: string) {
+  if (host) {
+    setMsg("远端文件没法用本机程序打开，先下载下来");
+    return;
+  }
+  void invoke("fs_open", { path }).catch((e) => setMsg(`打不开：${e}`));
 }
 
 /** 真正写盘，失败会抛（bridge 的 /save 要知道成功与否） */
@@ -1189,8 +1333,8 @@ function joinPath(dir: string, name: string): string {
   return `${dir.replace(/[\/]+$/, "")}/${name}`;
 }
 
-async function askText(title: string, label: string, value = ""): Promise<string | null> {
-  const r = await ask(title, `<label>${label}</label><input id="mt-name" value="${value.replace(/"/g, "&quot;")}" />`, [
+async function askText(title: string, label: string, value = "", placeholder = ""): Promise<string | null> {
+  const r = await ask(title, `<label>${label}</label><input id="mt-name" value="${value.replace(/"/g, "&quot;")}" placeholder="${placeholder}" />`, [
     { label: "确定", value: "ok", primary: true },
     { label: "取消", value: "no" },
   ]);
@@ -1228,6 +1372,7 @@ function treeMenu(e: Entry, paths: string[]): MenuItem[] {
   // 浏览器/资源管理器定位只有本机有
   if (!host) {
     items.push({ label: "在资源管理器中显示", run: () => { void invoke("fs_reveal", { path: e.path }).catch((err) => setMsg(`打不开：${err}`)); } });
+    if (!e.is_dir) items.push({ label: "用系统程序打开", run: () => openExternal(e.path) });
   }
   return items;
 }
@@ -1259,7 +1404,12 @@ function setClip(paths: string[], cut: boolean) {
 }
 
 async function newEntry(dir: string, isDir: boolean) {
-  const name = await askText(isDir ? "新建文件夹" : "新建文件", "名称", isDir ? "新建文件夹" : "untitled.txt");
+  const name = await askText(
+    isDir ? "新建文件夹" : "新建文件",
+    "名称",
+    "",
+    isDir ? "文件夹名称（如 assets）" : "文件名（如 main.ts）"
+  );
   if (!name) return;
   const path = joinPath(dir, name);
   try {
@@ -1688,7 +1838,7 @@ async function editProfile(existing?: SshProfile) {
 
 let connecting = false;
 
-async function connectProfile(p: SshProfile) {
+async function connectProfile(p: SshProfile, retried = false) {
   if (connecting) return; // 连按两下不会连两次
   connecting = true;
   try {
@@ -1721,7 +1871,7 @@ async function connectProfile(p: SshProfile) {
     clearSel();
     setMsg(`正在连接 ${p.name}（${p.target}）…`);
     try {
-      await invoke("ssh_set_identity", { key: p.key ?? null });
+      await invoke("ssh_set_identity", { target: p.target, port: p.port, key: p.key ?? null });
       // 前端兜个底：即使后端出意外，20 秒后也不再等
       const home = await Promise.race([
         invoke<string>("ssh_home", { target: p.target, port: p.port }),
@@ -1748,11 +1898,37 @@ async function connectProfile(p: SshProfile) {
       setConnLabel();
       renderSsh();
       if (root) void refreshTree();
-      void invoke("ssh_set_identity", { key: null }).catch(() => {});
+      void invoke("ssh_set_identity", { target: p.target, port: p.port, key: null }).catch(() => {});
       setMsg(`连接 ${p.name} 失败`);
+      const msg = String(e);
+      // 同一个 IP 不同端口 = 可能是另一台机器：known_hosts 里那条记录对不上，ssh 会直接拒连。
+      // 让用户一键删掉 host:port 这一条再试，别去手动编辑 known_hosts
+      if (!retried && /host key verification failed|IDENTIFICATION HAS CHANGED|Host key for .* has changed/i.test(msg)) {
+        const fix = await ask(
+          "这台主机的密钥对不上",
+          `known_hosts 里 <b>${p.target}:${p.port}</b> 记的是另一台机器的密钥（同一个 IP 换端口/机器重装都会这样）。<br>` +
+            `删掉这条记录后重连吗？只会删这一条，别的机器不受影响。`,
+          [
+            { label: "取消", value: "no" },
+            { label: "删掉并重连", value: "ok", primary: true },
+          ]
+        );
+        if (fix === "ok") {
+          try {
+            await invoke("ssh_forget_host", { target: p.target, port: p.port });
+          } catch (err) {
+            setMsg(`清理失败：${err}`);
+            return; // finally 里会放开 connecting
+          }
+          connecting = false; // 让下面的重连能进去
+          setMsg("已清掉旧的主机密钥记录，正在重连…");
+          await connectProfile(p, true);
+          return;
+        }
+      }
       await ask("连接失败", `${p.target}:${p.port}
 
-${String(e)}`, [{ label: "好", value: "ok", primary: true }]);
+${msg}`, [{ label: "好", value: "ok", primary: true }]);
     }
   } finally {
     connecting = false;
@@ -2467,6 +2643,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") hideMenu();
     if (e.key === "Escape") closeModal();
+    if (e.key === "Escape") closeDoc();
   });
 
   // 资源管理器键盘：F2 改名、Delete 删除。
