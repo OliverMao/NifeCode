@@ -37,7 +37,7 @@
       </div>
 
       <div id="sidebar">
-        <div class="head">
+        <div class="head" id="side-head">
           <span id="sidebar-title">资源管理器</span>
           <button id="btn-open-folder" title="打开文件夹">＋</button>
         </div>
@@ -65,6 +65,7 @@
 
         <div id="scm">
           <div class="scm-head">
+            <select id="scm-repo" title="选择要管理的 git 仓库（工作区根目录或它下面的某个子文件夹）"></select>
             <span id="scm-branch">—</span>
             <span class="spacer"></span>
             <button id="scm-refresh" title="刷新">⟳</button>

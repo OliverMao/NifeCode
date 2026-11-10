@@ -48,6 +48,7 @@ interface Ctx {
   root: string | null;
   online?: boolean;    // 只有 SSH 用：false = 从上次会话恢复出来的、还没连
   wantRoot?: string;   // 重连后要回的目录（不是 $HOME 的时候）
+  gitRel?: string;     // 源代码管理盯着哪个仓库："" = 工作区根，否则是它下面的相对路径
 }
 
 const CTX_KEY = "contexts";
@@ -61,8 +62,8 @@ function saveCtxs() {
   if (cur) cur.root = root;
   const tabs = contexts.map((c) =>
     c.kind === "local"
-      ? { id: c.id, label: c.label, root: c.root }
-      : { id: c.id, label: c.label, root: c.root, host: c.host, port: c.port }
+      ? { id: c.id, label: c.label, root: c.root, gitRel: c.gitRel }
+      : { id: c.id, label: c.label, root: c.root, host: c.host, port: c.port, gitRel: c.gitRel }
   );
   ls.set(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
 }
@@ -72,7 +73,7 @@ function restoreCtxs() {
     const raw = ls.get(CTX_KEY);
     if (!raw) return;
     const data = JSON.parse(raw) as {
-      locals?: { id: string; label: string; root: string | null; host?: string | null; port?: number }[];
+      locals?: { id: string; label: string; root: string | null; host?: string | null; port?: number; gitRel?: string }[];
       activeId?: string;
     };
     if (!data.locals?.length) return;
@@ -86,6 +87,7 @@ function restoreCtxs() {
         host: isSsh ? (l.host ?? null) : null,
         port: l.port ?? 22,
         root: l.root,
+        gitRel: l.gitRel ?? "",
         online: isSsh ? false : undefined,
       });
     }
@@ -294,6 +296,8 @@ async function closeContext(id: string, keepSession = false) {
       activeId = next.id;
       applyActive();
       editor.dropCtx(id);
+      diffTabs.delete(id);
+      diffActive.delete(id);
       editor.setCtx(activeId);
       renderTabs();
       renderStatusInfo();
@@ -340,6 +344,8 @@ async function closeContext(id: string, keepSession = false) {
   dropTermSet(id);
   bindTermSet();
   editor.dropCtx(id);
+  diffTabs.delete(id);
+  diffActive.delete(id);
   setMsg("已断开 SSH，回到本机");
 }
 
@@ -967,6 +973,93 @@ function markTabDirty(path: string, dirty: boolean) {
   el?.classList.toggle("dirty", dirty);
 }
 
+// ---------- 对照（diff）标签页：和文件标签同级，占编辑器那块地方 ----------
+interface DiffTab { id: string; path: string; title: string; oldText: string; newText: string }
+const diffTabs = new Map<string, DiffTab[]>();       // 每个上下文一组，切项目不串台
+const diffActive = new Map<string, string | null>(); // 每个上下文当前看的是哪个 diff
+let diffShownId = "";                                // 编辑器位置上现在铺的是哪个 diff
+let diffEd: import("monaco-editor").editor.IStandaloneDiffEditor | null = null;
+let diffModel: { original: any; modified: any } | null = null;
+
+function diffHost(): HTMLElement {
+  let h = document.getElementById("diff-host");
+  if (!h) {
+    h = document.createElement("div");
+    h.id = "diff-host";
+    h.className = "hidden";
+    $<HTMLDivElement>("#main").appendChild(h);
+  }
+  return h;
+}
+
+/** 编辑器位置交还给普通编辑器 */
+function showEditorArea() {
+  diffShownId = "";
+  diffHost().classList.add("hidden");
+  $("#editor").classList.remove("hidden");
+}
+
+/** 把某个 diff 铺到编辑器位置（同一时间只留一个 Monaco diff 实例，模型换内容） */
+async function mountDiff(t: DiffTab) {
+  if (diffShownId === t.id) return;
+  diffShownId = t.id;
+  const h = diffHost();
+  $("#editor").classList.add("hidden");
+  h.classList.remove("hidden");
+  const { monaco } = await import("./editor");
+  if (!diffEd) {
+    diffEd = monaco.editor.createDiffEditor(h, {
+      theme: "vs-dark",
+      automaticLayout: true,
+      renderSideBySide: true,
+      // 一律左右两栏：中栏窄的时候 Monaco 默认会自动切成"单栏内联"，那就不叫对照了
+      useInlineViewWhenSpaceIsLimited: false,
+      wordWrap: "on",
+      readOnly: true, // 对照只是看，改文本请关掉它回文件标签
+    });
+  }
+  diffModel?.original.dispose();
+  diffModel?.modified.dispose();
+  diffModel = {
+    original: monaco.editor.createModel(t.oldText, undefined, monaco.Uri.parse(`inmemory://original/${t.id}`)),
+    modified: monaco.editor.createModel(t.newText, undefined, monaco.Uri.parse(`inmemory://proposed/${t.id}`)),
+  };
+  diffEd.setModel(diffModel);
+  $<HTMLSpanElement>("#st-msg").textContent = `${t.path}（对照，只读）`;
+}
+
+/** 开一个 diff 标签（同一个文件已有就复用，换成新内容） */
+function openDiffTab(path: string, oldText: string, newText: string, title: string) {
+  const list = diffTabs.get(activeId) ?? [];
+  let t = list.find((x) => x.path === path);
+  if (t) {
+    t.oldText = oldText;
+    t.newText = newText;
+    t.title = title;
+  } else {
+    t = { id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, path, title, oldText, newText };
+    list.push(t);
+  }
+  diffTabs.set(activeId, list);
+  diffActive.set(activeId, t.id);
+  void mountDiff(t);
+  renderTabs();
+}
+
+function closeDiffTab(id: string) {
+  const list = diffTabs.get(activeId) ?? [];
+  const i = list.findIndex((t) => t.id === id);
+  if (i < 0) return;
+  const wasActive = diffActive.get(activeId) === id;
+  list.splice(i, 1);
+  if (list.length === 0) diffTabs.delete(activeId);
+  if (wasActive) {
+    diffActive.set(activeId, null);
+    showEditorArea(); // 回到原来那个文件标签
+  }
+  renderTabs();
+}
+
 function renderTabs(activePath?: string) {
   const box = $("#tabs");
   box.innerHTML = "";
@@ -974,7 +1067,11 @@ function renderTabs(activePath?: string) {
     closeImage();
     closeDoc(); // 切标签就别让文档预览继续盖着
   }
-  const cur = activePath ?? editor.current()?.path;
+  // 点了文件标签（或者打开/保存后重画）就把 diff 收起来，别两份"当前"打架
+  if (activePath) diffActive.set(activeId, null);
+  const dtabs = diffTabs.get(activeId) ?? [];
+  const dtId = diffActive.get(activeId) ?? null;
+  const cur = dtId ? undefined : activePath ?? editor.current()?.path;
   for (const p of editor.paths()) {
     const el = document.createElement("div");
     el.className = "tab" + (p === cur ? " active" : "");
@@ -1008,6 +1105,51 @@ function renderTabs(activePath?: string) {
     };
     box.appendChild(el);
   }
+  for (const t of dtabs) {
+    const el = document.createElement("div");
+    el.className = "tab diff" + (t.id === dtId ? " active" : "");
+    el.dataset.diff = t.id;
+    const name = document.createElement("span");
+    name.className = "dname";
+    // 图标自己画：⇄ 这个字符跟标题同字号又大又重，缩小还是丑
+    const ico = document.createElement("span");
+    ico.className = "dico";
+    ico.innerHTML =
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M13 5H4"/><path d="M6.5 2.5 4 5l2.5 2.5"/>' +
+      '<path d="M3 11h9"/><path d="M9.5 8.5 12 11l-2.5 2.5"/></svg>';
+    name.append(ico, document.createTextNode(t.title));
+    name.style.overflow = "hidden";
+    name.style.textOverflow = "ellipsis";
+    bindTip(el, name, () => `${t.path}（对照）`);
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "✕";
+    x.onclick = (e) => {
+      e.stopPropagation();
+      closeDiffTab(t.id);
+    };
+    el.append(name, x);
+    el.onclick = () => {
+      diffActive.set(activeId, t.id);
+      void mountDiff(t);
+      renderTabs();
+    };
+    el.onauxclick = (ev) => {
+      if (ev.button === 1) {
+        ev.preventDefault();
+        closeDiffTab(t.id);
+      }
+    };
+    box.appendChild(el);
+  }
+  // 编辑器位置上铺 diff 还是正文，由"当前标签是哪个"决定
+  if (dtId) {
+    const t = dtabs.find((x) => x.id === dtId);
+    if (t) void mountDiff(t);
+    else showEditorArea();
+  } else showEditorArea();
+
   // 当前标签滚动到可见范围（标签多到装不下时，Ctrl+Tab 切过去也能看见）
   const box2 = $("#tabs");
   const active2 = box2.querySelector<HTMLElement>(".tab.active");
@@ -1954,6 +2096,78 @@ function absJoin(rootDir: string, rel: string) {
 
 let lastGitJson = "";
 
+/** 源代码管理当前盯着的仓库目录（工作区根 或 根下面的某个子文件夹） */
+function gitCwd(): string | null {
+  if (!root) return null;
+  const rel = curCtx().gitRel ?? "";
+  return rel ? absJoin(root, rel) : root;
+}
+
+// 扫描结果缓存：每个「上下文+根目录」只扫一次，别让 4 秒轮询反复扫盘
+const repoCache = new Map<string, string[]>();
+
+/** 找出工作区里所有 git 仓库（含根目录本身），返回相对工作区根的路径，"" = 根目录 */
+async function findRepos(base: string): Promise<string[]> {
+  const key = `${host ?? ""}:${port}:${base}`;
+  const hit = repoCache.get(key);
+  if (hit) return hit;
+  const out: string[] = [];
+  const skip = new Set([".git", "node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"]);
+  // shortcut: 扫盘上限 300 个目录。再深/再大的树靠⟳重扫也没意义，选根目录就够了
+  let budget = 300;
+  const walk = async (dir: string, rel: string, depth: number) => {
+    if (budget-- <= 0) return;
+    let entries: Entry[];
+    try {
+      entries = await invoke<Entry[]>("read_dir", { ...connArg(), path: dir });
+    } catch {
+      return;
+    }
+    if (entries.some((e) => e.name === ".git")) out.push(rel);
+    if (depth >= 3) return; // 只看三层，再深的子仓库用不上还拖慢扫描
+    for (const e of entries) {
+      if (!e.is_dir || skip.has(e.name) || e.name.startsWith(".")) continue;
+      await walk(e.path, rel ? `${rel}/${e.name}` : e.name, depth + 1);
+    }
+  };
+  await walk(base, "", 0);
+  repoCache.set(key, out);
+  return out;
+}
+
+/** 把扫描到的仓库填进下拉框；选中的那个存进 ctx，重开还在 */
+async function fillRepoPicker(): Promise<string[]> {
+  const sel = $<HTMLSelectElement>("#scm-repo");
+  const base = root;
+  if (!base) { sel.innerHTML = ""; return []; }
+  const repos = await findRepos(base);
+  const want = curCtx().gitRel ?? "";
+  // 之前选的仓库没了（文件夹被删/换了工作区）就退回根目录
+  if (want && !repos.includes(want)) {
+    curCtx().gitRel = ""; // 之前选的仓库没了，退回根目录，顺便把记录也改掉
+    saveCtxs();
+  }
+  const sig = repos.join("|") + `##${base}`;
+  if (sel.dataset.sig === sig) return repos; // 列表没变，不重建（否则轮询会关掉用户展开的下拉）
+  sel.dataset.sig = sig;
+  sel.innerHTML = "";
+  for (const r of repos) {
+    const o = document.createElement("option");
+    o.value = r;
+    o.textContent = r || `（工作区根目录）${base.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? ""}`;
+    sel.appendChild(o);
+  }
+  if (repos.length === 0) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "（没找到 git 仓库）";
+    sel.appendChild(o);
+  }
+  sel.value = repos.includes(want) ? want : repos[0] ?? "";
+  if (sel.value !== (curCtx().gitRel ?? "")) curCtx().gitRel = sel.value;
+  return repos;
+}
+
 function renderGit(info: GitInfo | null) {
   const json = JSON.stringify(info);
   if (json === lastGitJson) return; // 数据没变就别重建列表（4s 轮询会打断点击）
@@ -1982,7 +2196,7 @@ function renderGit(info: GitInfo | null) {
     diffBtn.title = "和 HEAD 对比";
     diffBtn.onclick = (e) => { e.stopPropagation(); void openGitDiff(f.path); };
     row.append(st, name, diffBtn);
-    row.onclick = () => void openFile(absJoin(root!, f.path));
+    row.onclick = () => void openFile(absJoin(gitCwd() ?? root!, f.path));
     list.appendChild(row);
   }
 }
@@ -1992,7 +2206,9 @@ async function loadGit() {
   const label = $<HTMLSpanElement>("#scm-branch");
   if (label.textContent === "—") label.textContent = "读取中…";
   try {
-    const info = await invoke<GitInfo>("git_info", { ...connArg(), cwd: root });
+    await fillRepoPicker();
+    const cwd = gitCwd()!;
+    const info = await invoke<GitInfo>("git_info", { ...connArg(), cwd });
     renderGit(info);
   } catch (e) {
     $<HTMLSpanElement>("#scm-branch").textContent = `git 出错：${e}`;
@@ -2001,12 +2217,13 @@ async function loadGit() {
 
 async function openGitDiff(rel: string) {
   if (!root) return;
-  const abs = absJoin(root, rel);
-  const oldText = await invoke<string>("git_head_file", { ...connArg(), cwd: root, path: rel }).catch(() => "");
+  const cwd = gitCwd() ?? root;
+  const abs = absJoin(cwd, rel);
+  const oldText = await invoke<string>("git_head_file", { ...connArg(), cwd, path: rel }).catch(() => "");
   const newText = await invoke<ReadFile>("read_file", { ...connArg(), path: abs })
     .then((r) => r.content)
     .catch(() => "");
-  await openDiff(abs, oldText, newText, { title: "Git HEAD 对比", apply: false });
+  openDiffTab(abs, oldText, newText, rel);
 }
 
 async function doCommit() {
@@ -2015,7 +2232,7 @@ async function doCommit() {
   const message = box.value.trim();
   if (!message) { setMsg("提交信息不能为空"); return; }
   try {
-    const hash = await invoke<string>("git_commit", { ...connArg(), cwd: root, message });
+    const hash = await invoke<string>("git_commit", { ...connArg(), cwd: gitCwd()!, message });
     box.value = "";
     setMsg(`已提交 ${hash}`);
     await loadGit();
@@ -2030,40 +2247,94 @@ interface SearchHit { path: string; line: number; text: string }
 async function runSearch() {
   const q = $<HTMLInputElement>("#search-input").value.trim();
   const list = $("#search-list");
-  if (!root || !q) { list.innerHTML = ""; return; }
-  list.innerHTML = `<div class="sr-count">搜索中…</div>`;
+  if (!root) { list.innerHTML = `<div class="sr-empty">先打开一个文件夹再搜</div>`; return; }
+  if (!q) { list.innerHTML = `<div class="sr-empty">输入关键词，回车搜索（当前工作区）</div>`; return; }
+  list.innerHTML = `<div class="sr-empty">搜索中…</div>`;
   try {
     const hits = await invoke<SearchHit[]>("search", { ...connArg(), cwd: root, query: q, max: 200 });
     list.innerHTML = "";
     if (hits.length === 0) {
-      list.innerHTML = `<div class="sr-count">没有匹配</div>`;
+      list.innerHTML = `<div class="sr-empty"></div>`;
+      list.firstElementChild!.textContent = `没有匹配 “${q}”`;
       return;
     }
-    const count = document.createElement("div");
-    count.className = "sr-count";
-    count.textContent = `${hits.length} 处匹配`;
-    list.appendChild(count);
+    const base = root.replace(/[\\/]/g, "/").replace(/\/+$/, "");
+    // 按文件分组：同一个文件的命中收在一个标题下面（VS Code 的样子）
+    const groups = new Map<string, SearchHit[]>();
     for (const h of hits) {
-      const row = document.createElement("div");
-      row.className = "sr-row";
-      row.title = `${h.path}:${h.line}`;
-      const file = document.createElement("span");
-      file.className = "sr-file";
-      const rel = h.path
-        .replace(/\\/g, "/")
-        .replace(root.replace(/\\/g, "/").replace(/\/+$/, "") + "/", "");
-      file.textContent = `${rel}:${h.line}`;
-      const text = document.createElement("span");
-      text.className = "sr-text";
-      text.textContent = h.text;
-      row.append(file, text);
-      row.onclick = () => void openFile(h.path, h.line);
-      list.appendChild(row);
+      const rel = h.path.replace(/[\\/]/g, "/").replace(base + "/", "");
+      const g = groups.get(rel);
+      if (g) g.push(h);
+      else groups.set(rel, [h]);
+    }
+    const sum = document.createElement("div");
+    sum.className = "sr-sum";
+    sum.textContent = `${hits.length} 处匹配 · ${groups.size} 个文件${hits.length >= 200 ? "（已达上限，只显示前 200 处）" : ""}`;
+    list.appendChild(sum);
+
+    for (const [rel, items] of groups) {
+      const head = document.createElement("div");
+      head.className = "sr-head";
+      head.title = items[0].path;
+      const svg = document.createElement("span");
+      svg.className = "ico";
+      svg.innerHTML = iconSvg(iconFor(baseName(rel), false, false));
+      const name = document.createElement("span");
+      name.className = "sr-file";
+      const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/") + 1) : "";
+      if (dir) {
+        const d = document.createElement("span");
+        d.className = "sr-dir";
+        d.textContent = dir;
+        name.appendChild(d);
+      }
+      const nameEl = document.createElement("span");
+      nameEl.textContent = rel.slice(dir.length);
+      name.appendChild(nameEl);
+      const num = document.createElement("span");
+      num.className = "sr-num";
+      num.textContent = String(items.length);
+      head.append(svg, name, num);
+      head.onclick = () => void openFile(items[0].path, items[0].line);
+      list.appendChild(head);
+
+      for (const h of items) {
+        const row = document.createElement("div");
+        row.className = "sr-row";
+        row.title = `${h.path}:${h.line}`;
+        const ln = document.createElement("span");
+        ln.className = "sr-line";
+        ln.textContent = String(h.line);
+        const text = document.createElement("span");
+        text.className = "sr-text";
+        markHit(text, h.text.trim(), q);
+        row.append(ln, text);
+        row.onclick = () => void openFile(h.path, h.line);
+        list.appendChild(row);
+      }
     }
   } catch (e) {
     list.innerHTML = "";
     setMsg(`搜索失败：${e}`);
   }
+}
+
+/** 把一行里命中的片段套上 <mark>；用 textContent 拼，别拼 innerHTML（文件内容是脏的） */
+function markHit(box: HTMLElement, text: string, q: string) {
+  const low = text.toLowerCase();
+  const ql = q.toLowerCase();
+  let i = 0;
+  for (;;) {
+    const at = low.indexOf(ql, i);
+    if (at < 0) break;
+    if (at > i) box.appendChild(document.createTextNode(text.slice(i, at)));
+    const m = document.createElement("mark");
+    m.textContent = text.slice(at, at + q.length);
+    box.appendChild(m);
+    i = at + q.length;
+  }
+  if (i < text.length) box.appendChild(document.createTextNode(text.slice(i)));
+  if (!text) box.textContent = "";
 }
 
 /** 全项目替换：直接改磁盘，改完把改过的文件里已打开且不脏的重新读一遍 */
@@ -2427,7 +2698,17 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (r === "stop") { await invoke("fwd_stop_all").catch(() => {}); await renderForwards(); setMsg("已停止全部端口转发"); }
   };
 
-  $<HTMLButtonElement>("#scm-refresh").onclick = () => void loadGit();
+  $<HTMLSelectElement>("#scm-repo").addEventListener("change", () => {
+    curCtx().gitRel = $<HTMLSelectElement>("#scm-repo").value;
+    saveCtxs();
+    lastGitJson = ""; // 强制重建变更列表
+    void loadGit();
+  });
+  $<HTMLButtonElement>("#scm-refresh").onclick = () => {
+    repoCache.delete(`${host ?? ""}:${port}:${root ?? ""}`); // 新加/删掉的仓库靠这个刷新
+    lastGitJson = "";
+    void loadGit();
+  };
   $<HTMLButtonElement>("#scm-do").onclick = () => void doCommit();
   $<HTMLTextAreaElement>("#scm-msg").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void doCommit(); }
@@ -2457,6 +2738,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       b.classList.add("active");
       $("#sidebar").classList.remove("collapsed");
       const titles: Record<string, string> = { explorer: "资源管理器", search: "搜索", scm: "源代码管理", ssh: "SSH 连接" };
+      // 这条头只服务于文件树（标题 + 打开文件夹）；搜索/源代码管理/SSH 都各有自己的头
+      $("#side-head").classList.toggle("hidden", act !== "explorer");
       $("#tree").classList.toggle("hidden", act !== "explorer");
       $("#search-panel").classList.toggle("active", act === "search");
       $("#scm").classList.toggle("active", act === "scm");

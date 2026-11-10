@@ -162,6 +162,7 @@ body {
 
 #tree { flex: 1; overflow: auto; padding-bottom: 8px; }
 #tree.hidden { display: none; }
+#side-head.hidden { display: none; } /* 标题栏只给文件树用，其它面板都有自己的头 */
 
 /* ---------- SSH 连接管理 ---------- */
 #ssh-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
@@ -206,12 +207,43 @@ body {
   width: 100%; background: #3c3c3c; border: 1px solid #555; color: #eee;
   padding: 5px 8px; border-radius: 2px; font: inherit;
 }
-#search-list { flex: 1; overflow: auto; }
-.sr-row { padding: 3px 10px; cursor: pointer; border-bottom: 1px solid #1f1f1f; }
+#search-list { flex: 1; overflow: auto; padding-bottom: 6px; }
+/* 汇总行 */
+.sr-sum {
+  padding: 6px 10px; font-size: 11px; color: var(--fg-dim);
+  position: sticky; top: 0; background: var(--bg-side); border-bottom: 1px solid var(--border); z-index: 1;
+}
+.sr-empty { padding: 10px; font-size: 12px; color: var(--fg-dim); }
+/* 文件分组标题：图标 + 目录（暗） + 文件名 + 命中数 */
+.sr-head {
+  display: flex; align-items: center; gap: 6px; padding: 4px 10px 3px; cursor: pointer;
+  font-size: calc(var(--ui) - 1px); color: var(--accent-fg);
+}
+.sr-head:hover { background: var(--hover); }
+.sr-head .ico { display: flex; width: 14px; height: 14px; flex: none; }
+.sr-head .ico svg { width: 14px; height: 14px; }
+.sr-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-dir { color: var(--fg-dim); }
+.sr-num {
+  flex: none; min-width: 18px; text-align: center; font-size: 10px; color: var(--fg-dim);
+  background: #37373d; border-radius: 8px; padding: 0 5px; line-height: 15px;
+}
+/* 命中行：行号（等宽、暗） + 内容，命中处紫色高亮 */
+.sr-row {
+  display: flex; gap: 8px; padding: 2px 10px 2px 22px; cursor: pointer;
+  border-bottom: 1px solid #1f1f1f;
+}
 .sr-row:hover { background: var(--hover); }
-.sr-file { display: block; font-size: calc(var(--ui) - 1.5px); color: var(--accent-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sr-text { display: block; font-size: calc(var(--ui) - 1px); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sr-count { padding: 6px 10px; font-size: 11px; color: var(--fg-dim); }
+.sr-line {
+  flex: none; min-width: 26px; text-align: right; color: var(--fg-dim);
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: calc(var(--ui) - 2px); line-height: 17px;
+}
+.sr-text {
+  flex: 1; min-width: 0; font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: calc(var(--ui) - 1.5px); line-height: 17px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: pre;
+}
+.sr-text mark { background: #5a3d7a; color: #f0e6ff; border-radius: 2px; }
 
 /* ---------- 源代码管理 ---------- */
 #scm { display: none; flex: 1; min-height: 0; flex-direction: column; }
@@ -221,6 +253,13 @@ body {
   border-bottom: 1px solid var(--border); color: var(--fg);
 }
 .scm-head .spacer { flex: 1; }
+/* 仓库下拉：深色、和面板头同一行，只能选不手打 */
+#scm-repo {
+  min-width: 0; max-width: 62%; background: #3c3c3c; color: var(--fg); border: 1px solid #555;
+  border-radius: 2px; font: inherit; font-size: 11px; padding: 2px 4px; cursor: pointer;
+}
+#scm-repo:hover { border-color: #6d4a94; }
+#scm-repo option { background: #252526; color: var(--fg); }
 .scm-head button { background: transparent; border: 0; color: var(--fg-dim); cursor: pointer; font-size: 13px; }
 .scm-head button:hover { color: #fff; }
 #scm-list { flex: 1; overflow: auto; }
@@ -309,6 +348,16 @@ body {
 .tab.dirty .x { font-size: 9px; color: #e2c08d; }
 
 #editor { flex: 1; min-height: 0; position: relative; }
+#editor.hidden { display: none; }
+/* diff 标签占编辑器这块地方（和文件标签同级，不是浮层） */
+#diff-host { flex: 1; min-height: 0; position: relative; }
+#diff-host.hidden { display: none; }
+/* diff 标签：标题前带 ⇄，颜色压一点，和普通文件标签区分开 */
+.tab.diff .dname { color: var(--accent-fg); font-variant-numeric: tabular-nums; }
+.tab.diff .dname { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.tab.diff .dico { flex: none; display: flex; color: var(--fg-dim); opacity: .85; }
+.tab.diff .dico svg { width: calc(var(--ui) - 6px); height: calc(var(--ui) - 6px); }
+.tab.diff.active .dico { color: var(--accent-fg); opacity: 1; }
 
 /* ---------- 终端列（右侧，可堆叠多个终端 + 标签页） ---------- */
 #term-col {
