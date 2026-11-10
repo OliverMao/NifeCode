@@ -59,7 +59,69 @@ export interface Doc {
 
 export class EditorHost {
   private ed: monaco.editor.IStandaloneCodeEditor;
-  private docs = new Map<string, Doc>();
+  // 每个上下文（本机项目标签 / 每个 SSH 连接）各一份打开的文档，切换标签不会串台
+  private ctx = "";
+  private maps = new Map<string, Map<string, Doc>>();
+  private actives = new Map<string, string>(); // 每个上下文最后看的是哪个文件
+  private views = new Map<string, monaco.editor.ICodeEditorViewState | null>(); // 光标/滚动位置
+
+  /** 当前上下文的文档表 */
+  private get docs(): Map<string, Doc> {
+    let m = this.maps.get(this.ctx);
+    if (!m) {
+      m = new Map();
+      this.maps.set(this.ctx, m);
+    }
+    return m;
+  }
+
+  /** 跨所有上下文找（路径是唯一的，不用先知道在哪个上下文） */
+  private find(path: string): Doc | undefined {
+    for (const m of this.maps.values()) {
+      const d = m.get(path);
+      if (d) return d;
+    }
+    return undefined;
+  }
+
+  private allDocs(): Doc[] {
+    return [...this.maps.values()].flatMap((m) => [...m.values()]);
+  }
+
+  /** 切到某个上下文：记住这边的光标位置，换成那边的文件（那边没开文件就空着） */
+  setCtx(id: string) {
+    if (id === this.ctx) return;
+    const cur = this.current();
+    if (cur) this.actives.set(this.ctx, cur.path);
+    this.views.set(this.ctx, this.ed.saveViewState());
+    this.ctx = id;
+    const p = this.actives.get(id);
+    const d = p ? this.docs.get(p) : undefined;
+    this.ed.setModel(d ? d.model : null);
+    if (d) {
+      this.ed.updateOptions({ readOnly: d.readOnly });
+      const v = this.views.get(id);
+      if (v) this.ed.restoreViewState(v);
+    }
+  }
+
+  /** 上下文被关掉：把它的模型全释放，别留着占内存 */
+  dropCtx(id: string) {
+    const m = this.maps.get(id);
+    if (!m) return;
+    if (this.ctx === id) {
+      this.ed.setModel(null);
+      this.ctx = "";
+      this.maps.set("", new Map());
+      this.actives.delete("");
+    }
+    for (const d of m.values()) {
+      if (this.ed.getModel() === d.model) this.ed.setModel(null);
+      d.model.dispose();
+    }
+    this.maps.delete(id);
+    this.actives.delete(id);
+  }
   constructor(
     el: HTMLElement,
     onDirty: (path: string, dirty: boolean) => void,
@@ -104,7 +166,12 @@ export class EditorHost {
   current(): Doc | undefined {
     const model = this.ed.getModel();
     if (!model) return undefined;
-    for (const d of this.docs.values()) if (d.model === model) return d;
+    return this.allDocs().find((d) => d.model === model);
+  }
+
+  /** 这个文件当前开在哪个上下文里（崩溃恢复按它还原） */
+  ctxOf(path: string): string | undefined {
+    for (const [id, m] of this.maps) if (m.has(path)) return id;
     return undefined;
   }
 
@@ -113,26 +180,26 @@ export class EditorHost {
   }
 
   has(path: string): boolean {
-    return this.docs.has(path);
+    return !!this.find(path);
   }
 
   docsFor(path: string): Doc | undefined {
-    return this.docs.get(path);
+    return this.find(path);
   }
 
   mtimeOf(path: string): number | undefined {
-    return this.docs.get(path)?.mtime;
+    return this.find(path)?.mtime;
   }
 
   markSaved(path: string, mtime: number) {
-    const d = this.docs.get(path);
+    const d = this.find(path);
     if (!d) return;
     d.mtime = mtime;
     d.savedVersion = d.model.getAlternativeVersionId();
   }
 
   reopen(path: string, content: string, mtime: number, encoding?: string) {
-    const d = this.docs.get(path);
+    const d = this.find(path);
     if (!d) return this.open(path, content, mtime);
     // 保留滚动位置和光标，否则外部改动重载会像"整个编辑器被重置"
     const isActive = this.ed.getModel() === d.model;
@@ -171,6 +238,7 @@ export class EditorHost {
   ): Doc {
     let d = this.docs.get(path);
     if (!d) {
+      // shortcut: 同一个绝对路径在两个项目里各开一份会有两个同 URI 的模型（罕见），升级点：按 path 复用模型
       const model = monaco.editor.createModel(content, languageOf(path), monaco.Uri.file(path));
       // 默认 LF：文本里没出现过 CR 就不跟随 Windows 的 CRLF，新建文件/新行都是 LF
       if (!content.includes("\r")) model.setEOL(monaco.editor.EndOfLineSequence.LF);
@@ -189,19 +257,20 @@ export class EditorHost {
   }
 
   setEncoding(path: string, encoding: string) {
-    const d = this.docs.get(path);
+    const d = this.find(path);
     if (d) d.encoding = encoding;
   }
 
   /** 当前文档的换行符：LF / CRLF */
   eolOf(path?: string): string {
-    const d = path ? this.docs.get(path) : this.current();
+    const d = path ? this.find(path) : this.current();
     return d && d.model.getEOL() === "\r\n" ? "CRLF" : "LF";
   }
 
   show(path: string) {
-    const d = this.docs.get(path);
+    const d = this.find(path);
     if (!d) return;
+    this.actives.set(this.ctx, path);
     if (this.ed.getModel() !== d.model) this.ed.setModel(d.model);
     this.ed.updateOptions({ readOnly: d.readOnly }); // 超大文件只读
     this.ed.focus();
@@ -213,19 +282,34 @@ export class EditorHost {
   }
 
   close(path: string) {
-    const d = this.docs.get(path);
+    const d = this.find(path);
     if (!d) return;
     if (this.ed.getModel() === d.model) this.ed.setModel(null);
     d.model.dispose();
-    this.docs.delete(path);
+    for (const m of this.maps.values()) m.delete(path);
+    for (const [id, p] of this.actives) if (p === path) this.actives.delete(id);
   }
 
+  /** 当前上下文打开的标签（标签栏只用这个） */
   paths(): string[] {
     return [...this.docs.keys()];
   }
 
+  /** 所有上下文里开着的文件（外部改动检测要全查） */
+  allPaths(): string[] {
+    return this.allDocs().map((d) => d.path);
+  }
+
+  /** 某个上下文里的脏文件（关掉这个项目标签前要拦一下，别把没保存的改动丢进黑洞） */
+  dirtyOf(id: string): string[] {
+    const m = this.maps.get(id);
+    if (!m) return [];
+    return [...m.values()].filter((d) => this.isDirty(d)).map((d) => d.path);
+  }
+
+  /** 所有上下文里的脏文件（保存、bridge /state、退出确认都要全查） */
   dirtyPaths(): string[] {
-    return [...this.docs.values()].filter((d) => this.isDirty(d)).map((d) => d.path);
+    return this.allDocs().filter((d) => this.isDirty(d)).map((d) => d.path);
   }
 }
 

@@ -15,6 +15,19 @@ interface ReadFile { content: string; mtime: number; encoding: string; huge?: bo
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
+// ---------- 多窗口：一个进程里可以开多个窗口，每个窗口一套自己的状态 ----------
+// 窗口 label 由 Rust 生成（w<时间戳>），主窗口没有 query 参数
+const WIN = new URLSearchParams(location.search).get("w") ?? "main";
+const IS_MAIN = WIN === "main";
+/** 各窗口独立的键加前缀；ssh-profiles 共享（换窗口也还是那几台机器） */
+const SHARED_KEYS = new Set(["ssh-profiles"]);
+const ls = {
+  key: (k: string) => (IS_MAIN || SHARED_KEYS.has(k) ? k : `${WIN}:${k}`),
+  get: (k: string) => window.localStorage.getItem(ls.key(k)),
+  set: (k: string, v: string) => window.localStorage.setItem(ls.key(k), v),
+  remove: (k: string) => window.localStorage.removeItem(ls.key(k)),
+};
+
 // ---------- 连接状态：host 为 null 表示本地 ----------
 let host: string | null = null;
 let port = 22;
@@ -51,12 +64,12 @@ function saveCtxs() {
       ? { id: c.id, label: c.label, root: c.root }
       : { id: c.id, label: c.label, root: c.root, host: c.host, port: c.port }
   );
-  localStorage.setItem(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
+  ls.set(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
 }
 
 function restoreCtxs() {
   try {
-    const raw = localStorage.getItem(CTX_KEY);
+    const raw = ls.get(CTX_KEY);
     if (!raw) return;
     const data = JSON.parse(raw) as {
       locals?: { id: string; label: string; root: string | null; host?: string | null; port?: number }[];
@@ -101,6 +114,57 @@ function curCtx(): Ctx {
   return contexts.find((c) => c.id === activeId) ?? contexts[0];
 }
 
+// ---------- 长按项目标签拖出去 = 这个项目单开一个窗口 ----------
+let tearCtx: string | null = null; // 已长按、正在拖的那个
+let tearMoved = false; // 这次 pointerup 别当成普通点击
+let holdTimer: number | undefined;
+
+function tearReset() {
+  if (holdTimer !== undefined) {
+    clearTimeout(holdTimer);
+    holdTimer = undefined;
+  }
+  tearCtx = null;
+  document.querySelectorAll(".ctx-tab.tearing").forEach((e) => e.classList.remove("tearing"));
+}
+
+// 一离开标签栏就拖出去（不依赖 pointerup：拖到窗口外面时收不到 pointerup）
+window.addEventListener("pointermove", (ev) => {
+  if (!tearCtx) return;
+  const r = $("#ctx-tabs").getBoundingClientRect();
+  if (ev.clientY > r.bottom + 8 || ev.clientX < r.left - 8 || ev.clientX > r.right + 8) {
+    const id = tearCtx;
+    tearReset();
+    tearMoved = true;
+    void tearOut(id);
+  }
+});
+window.addEventListener("pointerup", () => {
+  const armed = tearCtx !== null;
+  tearReset();
+  if (armed) tearMoved = true; // 长按过就当是拖，不要切上下文
+});
+
+async function tearOut(id: string) {
+  const c = contexts.find((x) => x.id === id);
+  if (!c) return;
+  const r = id === activeId ? root : c.root;
+  if (!r) {
+    setMsg(c.kind === "ssh" ? "还没连上，先点一下这个标签" : "这个标签还没打开文件夹");
+    return;
+  }
+  const payload = JSON.stringify({ kind: c.kind, label: c.label, root: r, host: c.host, port: c.port });
+  const win = `w${Date.now()}`;
+  try {
+    await invoke("open_window", { id: win, title: `NifeCode — ${c.label}`, payload });
+  } catch (e) {
+    setMsg(`开新窗口失败：${e}`);
+    return;
+  }
+  if (contexts.length > 1) await closeContext(id, c.kind === "ssh");
+  setMsg(`「${c.label}」已放到新窗口`);
+}
+
 function renderCtxBar() {
   const bar = $("#ctx-tabs");
   bar.innerHTML = "";
@@ -120,7 +184,24 @@ function renderCtxBar() {
       x.onclick = (e) => { e.stopPropagation(); void closeContext(c.id); };
       el.appendChild(x);
     }
-    el.onclick = () => switchContext(c.id);
+    el.onpointerdown = (ev) => {
+      if (ev.button !== 0) return;
+      tearMoved = false;
+      if (holdTimer !== undefined) clearTimeout(holdTimer);
+      holdTimer = window.setTimeout(() => {
+        holdTimer = undefined;
+        tearCtx = c.id;
+        el.classList.add("tearing");
+        setMsg(`松手在外面：把「${c.label}」放进新窗口`);
+      }, 320);
+    };
+    el.onclick = () => {
+      if (tearMoved) {
+        tearMoved = false;
+        return;
+      }
+      switchContext(c.id);
+    };
     bar.appendChild(el);
   }
 }
@@ -141,6 +222,10 @@ function switchContext(id: string) {
   if (!contexts.some((c) => c.id === id)) return;
   activeId = id;
   applyActive();
+  void invoke("window_claim_root", { id: WIN, host, root: root ?? "", check: false }).catch(() => {});
+  editor.setCtx(id);     // 编辑区跟着项目走：只看这个项目打开的文件
+  renderTabs();
+  renderStatusInfo();
   bindTermSet();
   const prof = contexts.some((c) => c.id === id && c.kind === "ssh")
     ? sshProfiles().find((p) => `ssh:${p.id}` === id)
@@ -178,9 +263,29 @@ async function reconnectCtx(c: Ctx) {
   await connectProfile(prof);
 }
 
-async function closeContext(id: string) {
+async function closeContext(id: string, keepSession = false) {
   const c = contexts.find((x) => x.id === id);
   if (!c) return;
+  // 这个项目里还有没保存的文件：先问，别直接连缓冲区一起扔掉
+  const dirties = editor.dirtyOf(id);
+  if (dirties.length) {
+    const r = await ask("未保存的更改", `“${c.label}” 里还有 ${dirties.length} 个文件没保存：${dirties.map(baseName).join("、")}。`, [
+      { label: "全部保存", value: "save", primary: true },
+      { label: "不保存", value: "discard" },
+      { label: "取消", value: "cancel" },
+    ]);
+    if (r === "cancel") return;
+    if (r === "save") {
+      for (const p of dirties) {
+        try {
+          await savePathRaw(p);
+        } catch (e) {
+          setMsg(`保存失败：${baseName(p)}（${e}）`);
+          return;
+        }
+      }
+    }
+  }
   if (c.kind === "local") {
     if (contexts.filter((x) => x.kind === "local").length <= 1 && contexts.length <= 1) return;
     contexts.splice(contexts.indexOf(c), 1);
@@ -188,12 +293,17 @@ async function closeContext(id: string) {
       const next = contexts.find((x) => x.kind === "local") ?? contexts[0];
       activeId = next.id;
       applyActive();
+      editor.dropCtx(id);
+      editor.setCtx(activeId);
+      renderTabs();
+      renderStatusInfo();
       expanded.clear();
   clearSel();
       $("#tree").innerHTML = "";
       if (root) void refreshTree();
       renderGit(null);
     }
+    editor.dropCtx(id);
     renderCtxBar();
     setConnLabel();
     saveCtxs();
@@ -202,13 +312,19 @@ async function closeContext(id: string) {
     return;
   }
   // shortcut: 关任何一个 SSH 标签都会把所有常驻通道关掉，下次用再重开（约 3 秒）
-  await invoke("ssh_close").catch(() => {});
-  await invoke("fwd_stop_all").catch(() => {});
-  void invoke("ssh_set_identity", { key: null }).catch(() => {});
+  // 拖到新窗口时 keepSession=true：那条通道留给新窗口直接用
+  if (!keepSession) {
+    await invoke("ssh_close").catch(() => {});
+    await invoke("fwd_stop_all").catch(() => {});
+    void invoke("ssh_set_identity", { key: null }).catch(() => {});
+  }
   contexts.splice(contexts.indexOf(c), 1);
   if (activeId === id) {
     activeId = "local";
     applyActive();
+    editor.setCtx(activeId);
+    renderTabs();
+    renderStatusInfo();
     expanded.clear();
   clearSel();
     $("#tree").innerHTML = "";
@@ -220,6 +336,7 @@ async function closeContext(id: string) {
   saveCtxs();
   dropTermSet(id);
   bindTermSet();
+  editor.dropCtx(id);
   setMsg("已断开 SSH，回到本机");
 }
 
@@ -398,12 +515,12 @@ function snapshotDirty() {
     .dirtyPaths()
     .map((p) => {
       const d = editor.docsFor(p)!;
-      return { path: p, content: d.model.getValue().slice(0, 2_000_000), encoding: d.encoding };
+      return { path: p, content: d.model.getValue().slice(0, 2_000_000), encoding: d.encoding, ctx: editor.ctxOf(p) ?? activeId };
     })
     .filter((it) => !editor.docsFor(it.path)?.host);
   try {
-    if (list.length) localStorage.setItem(DIRTY_KEY, JSON.stringify(list));
-    else localStorage.removeItem(DIRTY_KEY);
+    if (list.length) ls.set(DIRTY_KEY, JSON.stringify(list));
+    else ls.remove(DIRTY_KEY);
   } catch {
     /* 存不下就算了，别让快照把界面搞崩 */
   }
@@ -411,10 +528,10 @@ function snapshotDirty() {
 
 async function restoreDirty() {
   if (!settings.snapshot) return;
-  const raw = localStorage.getItem(DIRTY_KEY);
+  const raw = ls.get(DIRTY_KEY);
   if (!raw) return;
-  localStorage.removeItem(DIRTY_KEY); // 只恢复一次
-  let list: { path: string; content: string; encoding: string }[] = [];
+  ls.remove(DIRTY_KEY); // 只恢复一次
+  let list: { path: string; content: string; encoding: string; ctx?: string }[] = [];
   try {
     list = JSON.parse(raw);
   } catch {
@@ -434,10 +551,14 @@ async function restoreDirty() {
   for (const it of list) {
     const res = await invoke<ReadFile>("read_file", { host: null, port: 22, path: it.path }).catch(() => null);
     if (!res) continue;
+    // 恢复回它原来所属的项目标签，别全堆在当前标签里
+    editor.setCtx(it.ctx && contexts.some((c) => c.id === it.ctx) ? it.ctx : activeId);
     editor.openDirty(it.path, it.content, res.mtime, null, 22, it.encoding);
     n++;
   }
+  editor.setCtx(activeId);
   renderTabs();
+  renderStatusInfo();
   setMsg(n ? `恢复了 ${n} 个文件` : "没有可恢复的文件");
 }
 
@@ -454,12 +575,12 @@ interface Settings {
 const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, eol: "lf", shell: "", confirmClose: true, snapshot: true };
 
 function loadSettings(): Settings {
-  const b = (k: string, d: boolean) => (localStorage.getItem(k) === null ? d : localStorage.getItem(k) === "1");
+  const b = (k: string, d: boolean) => (ls.get(k) === null ? d : ls.get(k) === "1");
   return {
     minimap: b("minimap", SET_DEFAULTS.minimap),
     wordWrap: b("editor-wrap", SET_DEFAULTS.wordWrap),
-    eol: (localStorage.getItem("eol") as "lf" | "crlf") || SET_DEFAULTS.eol,
-    shell: localStorage.getItem("term-shell") ?? SET_DEFAULTS.shell,
+    eol: (ls.get("eol") as "lf" | "crlf") || SET_DEFAULTS.eol,
+    shell: ls.get("term-shell") ?? SET_DEFAULTS.shell,
     confirmClose: b("confirm-close", SET_DEFAULTS.confirmClose),
     snapshot: b("snapshot", SET_DEFAULTS.snapshot),
   };
@@ -535,7 +656,7 @@ async function showSettings() {
   ]);
 
   const on = <T extends HTMLElement>(id: string) => document.getElementById(id) as T | null;
-  const save = (k: string, v: string) => localStorage.setItem(k, v);
+  const save = (k: string, v: string) => ls.set(k, v);
 
   const font = on<HTMLInputElement>("set-font");
   font?.addEventListener("input", () => {
@@ -607,11 +728,11 @@ async function showSettings() {
 // ---------- 字号缩放（Ctrl+= / Ctrl+- / Ctrl+0）----------
 const FONT_KEY = "font-size";
 const FONT_DEFAULT = 13;
-let fontSize = Number(localStorage.getItem(FONT_KEY)) || FONT_DEFAULT;
+let fontSize = Number(ls.get(FONT_KEY)) || FONT_DEFAULT;
 
 function applyFontSize(px: number) {
   fontSize = Math.max(9, Math.min(28, Math.round(px)));
-  localStorage.setItem(FONT_KEY, String(fontSize));
+  ls.set(FONT_KEY, String(fontSize));
   // 界面字号也跟着变：文件树、标签、状态栏、面板一起缩放
   document.documentElement.style.setProperty("--ui", `${fontSize}px`);
   editor.setFontSize(fontSize);
@@ -632,6 +753,7 @@ const editor = new EditorHost(
   },
   () => void saveCurrent()
 );
+editor.setCtx(activeId);
 
 // ---------- 标签页 ----------
 
@@ -1337,7 +1459,22 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
   container.appendChild(wrap);
 }
 
+/** 同一个项目只让一个窗口开：别的窗口已经开着就把它顶到前面，本窗口不重复开 */
+async function claimRoot(next?: string): Promise<boolean> {
+  const r = next ?? root;
+  if (!r) {
+    void invoke("window_claim_root", { id: WIN, host, root: "", check: false }).catch(() => {});
+    return true;
+  }
+  const other = await invoke<string | null>("window_claim_root", { id: WIN, host, root: r, check: true }).catch(() => null);
+  return !other;
+}
+
 async function openRoot(path: string) {
+  if (!(await claimRoot(path))) {
+    setMsg("这个项目已经在另一个窗口打开了，已经切过去");
+    return;
+  }
   root = path;
   const c = curCtx();
   c.root = path;
@@ -1361,7 +1498,7 @@ async function openRoot(path: string) {
 // ---------- 终端类型（PowerShell / cmd / WSL / Git Bash）----------
 interface ShellInfo { id: string; name: string; exe: string; args: string[] }
 const SHELL_KEY = "term-shell";
-let preferredShell = localStorage.getItem(SHELL_KEY) ?? "";
+let preferredShell = ls.get(SHELL_KEY) ?? "";
 let shellList: ShellInfo[] = [];
 
 async function loadShells() {
@@ -1448,11 +1585,11 @@ interface SshProfile {
 }
 
 function sshProfiles(): SshProfile[] {
-  try { return JSON.parse(localStorage.getItem("ssh-profiles") ?? "[]"); } catch { return []; }
+  try { return JSON.parse(ls.get("ssh-profiles") ?? "[]"); } catch { return []; }
 }
 
 function saveProfiles(list: SshProfile[]) {
-  localStorage.setItem("ssh-profiles", JSON.stringify(list));
+  ls.set("ssh-profiles", JSON.stringify(list));
 }
 
 function renderSsh() {
@@ -1825,7 +1962,7 @@ async function addForward() {
 // ---------- 外部改动检测 ----------
 const prompted = new Set<string>();
 async function pollExternalChanges() {
-  const paths = editor.paths();
+  const paths = editor.allPaths();
   if (paths.length === 0) return;
   // 按"来自哪台机器"分组，每组一次 stat_files
   const groups = new Map<string, { host: string | null; port: number; paths: string[] }>();
@@ -1902,6 +2039,7 @@ async function openLink(text: string) {
 
 // ---------- Agent Bridge ----------
 async function pushBridgeState() {
+  if (!IS_MAIN) return; // 多窗口时只让主窗口对外汇报，否则 /state 会来回跳
   const d = editor.current();
   const sel = (window as any).__sel;
   const cur = (window as any).__cur;
@@ -1947,7 +2085,7 @@ async function boot() {
       label: `${sh.id === preferredShell ? "● " : "　"}${sh.name}`,
       run: () => {
         preferredShell = sh.id;
-        localStorage.setItem(SHELL_KEY, sh.id);
+        ls.set(SHELL_KEY, sh.id);
         showTerm(true);
         void terms.newTerminal(sh.id); // 选类型也只是在当前页新建，不另开一页
         setMsg(`新终端：${sh.name}`);
@@ -1975,7 +2113,7 @@ async function boot() {
         window.removeEventListener("mouseup", up);
         document.body.style.cursor = "";
         const v = getComputedStyle(document.documentElement).getPropertyValue(cssVar);
-        localStorage.setItem(storeKey, String(parseFloat(v)));
+        ls.set(storeKey, String(parseFloat(v)));
         terms.fitAll();
       };
       window.addEventListener("mousemove", move);
@@ -1983,11 +2121,11 @@ async function boot() {
     });
   };
 
-  const savedSide = parseFloat(localStorage.getItem("side-w") ?? "");
+  const savedSide = parseFloat(ls.get("side-w") ?? "");
   if (savedSide) {
     document.documentElement.style.setProperty("--side-w", `${Math.min(savedSide, window.innerWidth - 800)}px`);
   }
-  const savedTerm = parseFloat(localStorage.getItem("term-w") ?? "");
+  const savedTerm = parseFloat(ls.get("term-w") ?? "");
   if (savedTerm) {
     // 至少给编辑器留 300px：48(活动栏) + 150(侧栏下限) + 300
     document.documentElement.style.setProperty("--term-w", `${Math.min(savedTerm, window.innerWidth - 498)}px`);
@@ -2063,7 +2201,26 @@ async function boot() {
   });
 
   restoreCtxs();
+  // 从别的窗口拖出来的：Rust 那边存了一份"该打开什么"，取一次就够
+  if (!IS_MAIN) {
+    const raw = await invoke<string | null>("window_payload", { id: WIN }).catch(() => null);
+    const p = raw ? (JSON.parse(raw) as { kind: "local" | "ssh"; label: string; root: string | null; host: string | null; port: number }) : null;
+    if (p) {
+      contexts.length = 0;
+      contexts.push({ id: "local:1", kind: p.kind, label: p.label, host: p.host, port: p.port, root: p.root, online: p.kind === "ssh" ? false : undefined });
+      activeId = "local:1";
+    }
+  }
   applyActive();
+  // 同一个项目已经开在别的窗口里了：那个窗口刚被顶到前面，本窗口没必要存在
+  // 先判这个再落盘，免得白写一份窗口专属的存储键
+  if (!(await claimRoot())) {
+    await getCurrentWindow().close().catch(() => {});
+    return;
+  }
+  // 存的时候要用 applyActive 之后的 root（saveCtxs 会把 curCtx().root 覆盖成当前 root）
+  if (!IS_MAIN) saveCtxs();
+  editor.setCtx(activeId); // 上下文是这会儿才从磁盘读回来的，编辑区要重新绑一次
   bindTermSet();
   renderCtxBar();
   if (root) void refreshTree();
@@ -2353,7 +2510,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   // 外面（agent）要保存文件：写完把结果回给 Rust，HTTP 那边才回 200/500
   await listen<{ path?: string }>("bridge:save", async (e) => {
     const want = e.payload?.path;
-    const targets = want ? [want] : editor.paths().filter((p) => { const d = editor.docsFor(p); return d && editor.isDirty(d); });
+    const targets = want ? [want] : editor.dirtyPaths();
     const saved: string[] = [];
     const errors: { path: string; error: string }[] = [];
     for (const p of targets) {

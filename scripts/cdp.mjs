@@ -15,7 +15,22 @@ if (!expr) {
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
 // 只认应用页面：WebView2 有时会冒出权限提示框之类的 page 目标
-const page = list.find((t) => t.type === "page" && t.url.startsWith("http")) ?? list.find((t) => t.type === "page");
+// CDP_PICK=<子串> 可以点名连某个窗口（多窗口时用），比如 CDP_PICK="w=" 连拖出来的窗口
+// CDP_PICK=__main__ 连主窗口（url 里没有 ?w=），其它值按子串匹配
+const want = process.env.CDP_PICK ?? "";
+if (want === "__main__") {
+  const main = list.find((t) => t.type === "page" && t.url.startsWith("http") && !t.url.includes("?"));
+  if (!main) {
+    console.error("没有找到主窗口");
+    process.exit(1);
+  }
+  globalThis.__mainPage = main;
+}
+const page =
+  globalThis.__mainPage ??
+  list.find((t) => t.type === "page" && t.url.startsWith("http") && t.url.includes(want)) ??
+  list.find((t) => t.type === "page" && t.url.startsWith("http")) ??
+  list.find((t) => t.type === "page");
 if (!page) {
   console.error("没有找到页面目标");
   process.exit(1);

@@ -9,6 +9,7 @@ mod fwd;
 mod git;
 mod pty;
 mod update;
+mod win;
 
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +27,11 @@ pub fn run() {
                 let _ = c.arg("--version").output();
             });
             Ok(())
+        })
+        .on_window_event(|w, ev| {
+            if let tauri::WindowEvent::Destroyed = ev {
+                win::forget(w.label());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             fsops::read_file,
@@ -68,6 +74,9 @@ pub fn run() {
             git::git_commit,
             update::update_check,
             update::update_install,
+            win::open_window,
+            win::window_payload,
+            win::window_claim_root,
         ])
         .run(tauri::generate_context!())
         .expect("NifeCode 启动失败");
