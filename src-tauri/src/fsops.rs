@@ -143,13 +143,46 @@ pub(crate) fn current_identity(target: &str, port: u16) -> Option<String> {
     identities().lock().unwrap().get(&ident_key(target, port)).cloned()
 }
 
-/// 删掉 known_hosts 里 host:port 那一条（同 IP 不同端口、或机器重装后密钥变了，
+/// NifeCode 自己的 known_hosts。不跟系统 %USERPROFILE%\.ssh\known_hosts 混用：
+/// 系统那份被 Xshell / git / 其它终端共用，任一边改一条都会波及另一边
+fn our_known_hosts() -> Option<std::path::PathBuf> {
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).ok()?;
+    Some(std::path::PathBuf::from(home).join(".ssh").join("nifecode_known_hosts"))
+}
+
+/// 这条记录在 known_hosts 里的名字：22 端口写 host，其它端口写 [host]:port（跟 ssh 自己的写法一致）
+fn host_alias(target: &str, port: u16) -> String {
+    if port == 22 {
+        target.to_string()
+    } else {
+        format!("[{target}]:{port}")
+    }
+}
+
+/// 指纹相关的 ssh 参数。执行通道 / 终端 / 端口转发三处都要带上，
+/// 否则同一个主机在不同通道里各存一份指纹、互相看不见
+pub(crate) fn known_host_args(target: &str, port: u16) -> Vec<String> {
+    let Some(kh) = our_known_hosts() else { return Vec::new() };
+    if let Some(dir) = kh.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    vec![
+        "-o".into(),
+        format!("UserKnownHostsFile={}", kh.to_string_lossy().replace('\\', "/")),
+        "-o".into(),
+        // 同名 IP 换端口/换机器也能连：指纹按「主机:端口」分开存
+        format!("HostKeyAlias={}", host_alias(target, port)),
+        "-o".into(),
+        // 再按 IP 存一条会跟「同 IP 不同端口的另一台机器」撞车
+        "CheckHostIP=no".into(),
+    ]
+}
+
+/// 删掉我们自己 known_hosts 里 host:port 那一条（机器重装、同 IP 换了端口/机器时，
 /// ssh 会报 "REMOTE HOST IDENTIFICATION HAS CHANGED" 直接拒绝连接）
 #[tauri::command]
 pub fn ssh_forget_host(target: String, port: u16) -> Result<(), String> {
-    let host = if port == 22 { target.clone() } else { format!("[{target}]:{port}") };
-    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).map_err(|_| "找不到 HOME 目录")?;
-    let kh = std::path::PathBuf::from(home).join(".ssh").join("known_hosts");
+    let kh = our_known_hosts().ok_or("找不到 HOME 目录")?;
     if !kh.exists() {
         return Ok(()); // 没有记录，本来就不该冲突
     }
@@ -158,7 +191,7 @@ pub fn ssh_forget_host(target: String, port: u16) -> Result<(), String> {
     // -R 既能删明文条目，也能删 hashed 条目（HashKnownHosts 开着时）
     let out = c
         .arg("-R")
-        .arg(&host)
+        .arg(host_alias(&target, port))
         .arg("-f")
         .arg(&kh)
         .output()
@@ -236,6 +269,7 @@ fn ssh_args(target: &str, port: u16) -> Vec<String> {
         // 每次都要重新拉起 askpass，输错密码要等 10 秒才报错
         "-o".into(), "NumberOfPasswordPrompts=1".into(),
     ];
+    v.extend(known_host_args(target, port));
     let has_pw = lookup_password(target, port).is_some();
     if !has_pw {
         v.insert(0, "-o".into());

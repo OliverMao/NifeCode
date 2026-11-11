@@ -288,6 +288,7 @@ body {
   white-space: nowrap; font-size: var(--ui);
 }
 .node:hover { background: var(--hover); }
+.node.current { background: rgba(180, 138, 224, .12); } /* 文件页当前看的文件；选中样式在它后面，选中时盖住这条 */
 .node.active { background: var(--sel); }
 .node .ico { width: calc(var(--ui) + 3px); height: calc(var(--ui) + 3px); flex: none; display: flex; align-items: center; justify-content: center; }
 .node .ico svg { display: block; width: calc(var(--ui) + 2px); height: calc(var(--ui) + 2px); }
@@ -330,8 +331,13 @@ body {
 #img-view .hd .sz { color: var(--fg-dim); }
 #img-view .hd .x { cursor: pointer; opacity: .75; padding: 0 4px; }
 #img-view .hd .x:hover { opacity: 1; }
-#img-view .bd { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; }
-#img-view img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto;
+#img-view .bd { flex: 1; min-height: 0; overflow: auto; }
+/* 内层 wrap 撑到图片实际大小，小图靠 margin:auto 居中；大图时不像 flex 居中那样把左上角藏到滚动区外（缩放锚点要用真实坐标） */
+#img-view .bd .wrap {
+  display: flex; width: max-content; min-width: 100%; height: max-content; min-height: 100%;
+  padding: 12px; box-sizing: border-box;
+}
+#img-view img { margin: auto; image-rendering: auto;
   background-image: linear-gradient(45deg, #2a2a2a 25%, transparent 25%), linear-gradient(-45deg, #2a2a2a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #2a2a2a 75%), linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
   background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0; }
 #tabs { display: flex; background: var(--bg-tab); overflow-x: auto; flex: 0 0 auto; height: 35px; position: relative; }

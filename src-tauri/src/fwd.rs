@@ -33,8 +33,12 @@ pub async fn fwd_start(
         "-N".into(),
         "-o".into(), "BatchMode=yes".into(),
         "-o".into(), "ExitOnForwardFailure=yes".into(),
+        // 我们自己的 known_hosts 里可能还没有这台机器（非交互、没法答应提示）
+        "-o".into(), "StrictHostKeyChecking=accept-new".into(),
         "-o".into(), "ServerAliveInterval=30".into(),
     ];
+    // 跟执行通道用同一份指纹记录
+    args.extend(crate::fsops::known_host_args(&target, port));
     if let Some(key) = crate::fsops::current_identity(&target, port) {
         args.push("-i".into());
         args.push(key);

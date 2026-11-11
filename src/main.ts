@@ -33,6 +33,8 @@ let host: string | null = null;
 let port = 22;
 let root: string | null = null;
 const expanded = new Set<string>();
+// 文件页当前看的是哪个文件：文件树把它的父级目录展开、行滚进可视区（VS Code 的 autoReveal）
+let lastReveal = "";
 
 function connArg() {
   return { host, port };
@@ -1072,6 +1074,7 @@ function renderTabs(activePath?: string) {
   const dtabs = diffTabs.get(activeId) ?? [];
   const dtId = diffActive.get(activeId) ?? null;
   const cur = dtId ? undefined : activePath ?? editor.current()?.path;
+  void revealInTree(cur); // 文件页换文件 → 左侧文件树展开到它
   for (const p of editor.paths()) {
     const el = document.createElement("div");
     el.className = "tab" + (p === cur ? " active" : "");
@@ -1217,7 +1220,51 @@ async function openFile(path: string, line?: number) {
   }
 }
 
-/** 图片预览：不改编辑器标签，盖一层浮层（带尺寸和关闭） */
+/**
+ * 图片预览的缩放状态：scale = 显示宽度 / 原始宽度，fit = 刚好铺满预览区时的 scale。
+ * Ctrl+滚轮锚在鼠标下的那一点，Ctrl +/- 锚在图像中心。
+ */
+let imgView: { img: HTMLImageElement; bd: HTMLElement; sz: HTMLElement; nw: number; nh: number; fit: number; scale: number; kb: number } | null = null;
+
+function imgLabel(v: NonNullable<typeof imgView>) {
+  v.sz.textContent = `${v.nw} × ${v.nh} · ${v.kb} KB · ${Math.round(v.scale * 100)}%`;
+}
+
+/** 缩放到 scale，并让屏幕点 (ax, ay) 下面的那一像素留在原地（点在图像外就锚图像中心） */
+function imgZoom(scale: number, ax: number, ay: number) {
+  const v = imgView;
+  if (!v) return;
+  const s = Math.min(Math.max(scale, v.fit), Math.max(v.fit * 16, 1));
+  const r0 = v.img.getBoundingClientRect();
+  if (ax < r0.left || ax > r0.right || ay < r0.top || ay > r0.bottom) {
+    ax = r0.left + r0.width / 2;
+    ay = r0.top + r0.height / 2;
+  }
+  const u = r0.width ? (ax - r0.left) / r0.width : 0.5;
+  const h = r0.height ? (ay - r0.top) / r0.height : 0.5;
+  v.scale = s;
+  v.img.style.width = `${v.nw * s}px`;
+  v.img.style.height = `${v.nh * s}px`;
+  const r1 = v.img.getBoundingClientRect(); // 读一次强制回流，拿到缩放后的真实位置
+  v.bd.scrollLeft += r1.left + u * r1.width - ax;
+  v.bd.scrollTop += r1.top + h * r1.height - ay;
+  imgLabel(v);
+}
+
+/** 回到「刚好铺满预览区」（跟原来的 max-width/max-height 一个效果），也是缩放下限 */
+function imgFit() {
+  const v = imgView;
+  if (!v) return;
+  const s = Math.min(1, (v.bd.clientWidth - 24) / v.nw, (v.bd.clientHeight - 24) / v.nh);
+  v.fit = Math.max(s, 0.01);
+  v.scale = v.fit;
+  v.img.style.width = `${v.nw * v.fit}px`;
+  v.img.style.height = `${v.nh * v.fit}px`;
+  v.bd.scrollLeft = v.bd.scrollTop = 0;
+  imgLabel(v);
+}
+
+/** 图片预览：不改编辑器标签，盖一层浮层（带尺寸、缩放比例和关闭） */
 async function openImage(path: string, ext: string) {
   setMsg(`正在载入图片 ${baseName(path)}…`);
   try {
@@ -1227,11 +1274,25 @@ async function openImage(path: string, ext: string) {
     closeImage();
     const box = document.createElement("div");
     box.id = "img-view";
-    box.innerHTML = `<div class="hd"><span class="nm"></span><span class="spacer"></span><span class="sz"></span><span class="x" title="关闭">✕</span></div><div class="bd"><img alt="" /></div>`;
+    box.innerHTML = `<div class="hd"><span class="nm"></span><span class="spacer"></span><span class="sz"></span><span class="x" title="关闭">✕</span></div><div class="bd"><div class="wrap"><img alt="" /></div></div>`;
     box.querySelector(".nm")!.textContent = path;
     const img = box.querySelector("img") as HTMLImageElement;
+    const bd = box.querySelector(".bd") as HTMLElement;
+    img.onload = () => {
+      imgView = { img, bd, sz: box.querySelector(".sz") as HTMLElement, nw: img.naturalWidth, nh: img.naturalHeight, fit: 1, scale: 1, kb: Math.round((b64.length * 3) / 4 / 1024) };
+      imgFit();
+    };
     img.src = `data:${mime};base64,${b64}`;
-    img.onload = () => { box.querySelector(".sz")!.textContent = `${img.naturalWidth} × ${img.naturalHeight} · ${Math.round((b64.length * 3) / 4 / 1024)} KB`; };
+    // Ctrl+滚轮缩放（不带 Ctrl 时照常滚动画布）；锚点交给 imgZoom 判断
+    box.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey) return;
+        e.preventDefault();
+        imgZoom((imgView?.scale ?? 1) * Math.exp(-e.deltaY / 500), e.clientX, e.clientY);
+      },
+      { passive: false }
+    );
     (box.querySelector(".x") as HTMLElement).onclick = closeImage;
     $("#editor").parentElement!.appendChild(box);
     setMsg(path);
@@ -1242,6 +1303,7 @@ async function openImage(path: string, ext: string) {
 
 function closeImage() {
   document.getElementById("img-view")?.remove();
+  imgView = null;
 }
 
 /** Word / PowerPoint：真渲染（docx-preview / pptx-preview），关掉时 destroy + 删 DOM，内存当场还回去 */
@@ -1412,11 +1474,14 @@ let treeFocus = false; // 最后一次点击落在文件树上（决定 F2/Delet
 function clearSel() {
   sel.clear();
   selAnchor = "";
+  lastReveal = ""; // 树被清空/换工作区了，下次得重新展开
 }
 
 function paintSel() {
+  const activeFile = editor.current()?.path;
   for (const n of document.querySelectorAll<HTMLElement>(".node")) {
     n.classList.toggle("active", sel.has(n.dataset.path!));
+    n.classList.toggle("current", n.dataset.path === activeFile);
   }
 }
 
@@ -1626,6 +1691,30 @@ async function pasteInto(dir: string) {
 
 let treeSig = "";
 let treeGen = 0;
+
+async function revealInTree(path?: string) {
+  if (!path || !root || path === lastReveal) return;
+  if ($("#tree").classList.contains("hidden")) return; // 左侧不是资源管理器，别在后台白跑 ssh
+  const base = root.replace(/[\\/]+$/, "");
+  const norm = path.replace(/\\/g, "/");
+  if (!norm.startsWith(`${base}/`)) return; // 不在当前工作区里（比如从别的工作区恢复的标签）
+  lastReveal = path;
+  let grew = false;
+  let dir = base;
+  // 去掉文件名，剩下的每一级都要展开
+  for (const d of norm.slice(base.length + 1).split("/").slice(0, -1)) {
+    dir = joinPath(dir, d);
+    if (!expanded.has(dir)) {
+      expanded.add(dir);
+      grew = true;
+    }
+  }
+  if (grew) await refreshTree();
+  paintSel(); // refreshTree 里已经画过，没重画也要把 .current 补上
+  const row = [...document.querySelectorAll<HTMLElement>("#tree .node")].find((n) => n.dataset.path === path);
+  row?.scrollIntoView({ block: "nearest" });
+}
+
 async function refreshTree() {
   if (!root) return;
   const gen = ++treeGen;
@@ -2048,7 +2137,7 @@ async function connectProfile(p: SshProfile, retried = false) {
       if (!retried && /host key verification failed|IDENTIFICATION HAS CHANGED|Host key for .* has changed/i.test(msg)) {
         const fix = await ask(
           "这台主机的密钥对不上",
-          `known_hosts 里 <b>${p.target}:${p.port}</b> 记的是另一台机器的密钥（同一个 IP 换端口/机器重装都会这样）。<br>` +
+          `NifeCode 自己的 known_hosts 里 <b>${p.target}:${p.port}</b> 记的是另一台机器的密钥（同一个 IP 换端口/机器重装都会这样）。<br>` +
             `删掉这条记录后重连吗？只会删这一条，别的机器不受影响。`,
           [
             { label: "取消", value: "no" },
@@ -2748,7 +2837,29 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       $<HTMLSpanElement>("#sidebar-title").textContent = titles[act ?? "explorer"] ?? "资源管理器";
       if (act === "scm") void loadGit();
       if (act === "search") $<HTMLInputElement>("#search-input").focus();
+      // 点回资源管理器时把文件树对齐到当前文件（可能是之前在搜索面板里打开的文件）
+      if (act === "explorer") void revealInTree(editor.current()?.path);
     };
+  });
+
+  // 图片预览：Ctrl +/- 以图像中心缩放（滚轮那份在 openImage 里）。用捕获阶段，
+  // 否则焦点还留在 Monaco 里时 Ctrl+- 会被编辑器的字体缩放吃掉
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (!imgView || !e.ctrlKey || e.altKey) return;
+      if (e.key !== "-" && e.key !== "_" && e.key !== "+" && e.key !== "=") return;
+      e.preventDefault();
+      const r = imgView.img.getBoundingClientRect();
+      const step = e.key === "-" || e.key === "_" ? 1 / 1.25 : 1.25;
+      imgZoom(imgView.scale * step, r.left + r.width / 2, r.top + r.height / 2);
+    },
+    true
+  );
+
+  // 图片预览还停在「铺满」状态时跟着窗口重算（手动缩放过的保持不动，别把人缩放位置弄丢）
+  window.addEventListener("resize", () => {
+    if (imgView && Math.abs(imgView.scale - imgView.fit) < 1e-3) imgFit();
   });
 
   window.addEventListener("keydown", (e) => {

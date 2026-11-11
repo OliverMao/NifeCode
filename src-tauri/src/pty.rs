@@ -156,6 +156,10 @@ pub fn pty_open(
             c.arg(t.port.to_string());
             c.arg("-o");
             c.arg("ServerAliveInterval=30");
+            // 跟执行通道用同一份指纹记录
+            for a in crate::fsops::known_host_args(&t.target, t.port) {
+                c.arg(a);
+            }
             if let Some(key) = crate::fsops::current_identity(&t.target, t.port) {
                 c.arg("-i");
                 c.arg(key);
