@@ -9,12 +9,14 @@ use std::process::Command;
 
 const TITLE: &str = "用 NifeCode 打开";
 
-/// 三处：任意文件、文件夹本身、文件夹空白处（+`%V`）
-fn keys() -> [(&'static str, &'static str); 3] {
+/// 三处：任意文件、文件夹本身、文件夹空白处（+`%V`）。
+/// 最后那个 bool = 要不要加 `MultiSelectModel=Single`：
+/// 文件夹空白处**不能加** —— 那里“选中的项”是 0 个，加了 Single 整条菜单会被筛掉（实测看不到）
+fn keys() -> [(&'static str, &'static str, bool); 3] {
     [
-        (r"HKCU\Software\Classes\*\shell\NifeCode", "%1"),
-        (r"HKCU\Software\Classes\Directory\shell\NifeCode", "%1"),
-        (r"HKCU\Software\Classes\Directory\Background\shell\NifeCode", "%V"),
+        (r"HKCU\Software\Classes\*\shell\NifeCode", "%1", true),
+        (r"HKCU\Software\Classes\Directory\shell\NifeCode", "%1", true),
+        (r"HKCU\Software\Classes\Directory\Background\shell\NifeCode", "%V", false),
     ]
 }
 
@@ -36,15 +38,20 @@ pub fn shell_menu_set(on: bool) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| format!("拿不到程序路径：{e}"))?;
-    for (key, arg) in keys() {
+    for (key, arg, multi) in keys() {
         if !on {
             let _ = reg(&["delete", key, "/f"]); // 不存在就当已经删了
             continue;
         }
         reg(&["add", key, "/ve", "/d", TITLE, "/f"])?;
         reg(&["add", key, "/v", "Icon", "/d", &format!("{exe},0"), "/f"])?;
-        // 多选时不要在资源管理器里一口气开一堆实例
-        reg(&["add", key, "/v", "MultiSelectModel", "/d", "Single", "/f"])?;
+        if multi {
+            // 多选时不要在资源管理器里一口气开一堆实例
+            reg(&["add", key, "/v", "MultiSelectModel", "/d", "Single", "/f"])?;
+        } else {
+            // 旧版本在空白处那条上也写过这个值，顺手清掉（就是它让菜单整条消失的）
+            let _ = reg(&["delete", key, "/v", "MultiSelectModel", "/f"]);
+        }
         let command = format!("{key}\\command");
         let value = format!("\"{exe}\" \"{arg}\"");
         reg(&["add", &command, "/ve", "/d", &value, "/f"])?;
@@ -52,10 +59,19 @@ pub fn shell_menu_set(on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 当前这个 exe 是不是 NSIS 安装版：安装目录里有个 `uninstall.exe`，便携版没有
+#[tauri::command]
+pub fn is_installed() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("uninstall.exe").exists()))
+        .unwrap_or(false)
+}
+
 /// 注册表里现在有没有（设置面板显示用；用户手动删了也能显示成"关"）
 #[tauri::command]
 pub fn shell_menu_state() -> bool {
-    keys().iter().all(|(key, _)| {
+    keys().iter().all(|(key, _, _)| {
         let mut c = Command::new("reg");
         crate::proc::hide_console(&mut c);
         c.arg("query").arg(key).output().map(|o| o.status.success()).unwrap_or(false)
@@ -109,5 +125,25 @@ pub fn forward_to_running(path: &str) -> bool {
     match s.read(&mut buf) {
         Ok(n) => String::from_utf8_lossy(&buf[..n]).contains(" 200"),
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_verb_has_no_multiselect() {
+        // 文件夹空白处那条不能带 MultiSelectModel=Single：那里"选中的项"是 0 个，
+        // 带上这个值整条菜单会被资源管理器筛掉（实测：加了就看不见，删了就出来）
+        for (key, arg, multi) in keys() {
+            if key.ends_with(r"Directory\Background\shell\NifeCode") {
+                assert_eq!(arg, "%V");
+                assert!(!multi, "空白处那条不能加 MultiSelectModel");
+            } else {
+                assert_eq!(arg, "%1");
+                assert!(multi);
+            }
+        }
     }
 }

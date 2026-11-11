@@ -604,6 +604,7 @@ async function showSettings() {
   const shells = shellList.length ? shellList : await loadShells();
   // 右键菜单的开关以注册表为准（用户可能自己手动删了）
   const menuOn = await invoke<boolean>("shell_menu_state").catch(() => false);
+  const installed = await invoke<boolean>("is_installed").catch(() => false);
   const rows: string[] = [];
   const row = (k: string, hint: string, v: string) =>
     `<div class="set-row"><div class="k"><b>${k}</b><span>${hint}</span></div><div class="v">${v}</div></div>`;
@@ -652,8 +653,10 @@ async function showSettings() {
   rows.push(sec("系统集成"));
   rows.push(
     row(
-      "资源管理器右键",
-      "文件和文件夹右键多一项「用 NifeCode 打开」，选文件夹就当工作区打开、选文件就直接打开（Win11 在「显示更多选项」里）",
+      installed ? "资源管理器右键（已安装版）" : "资源管理器右键（便携版）",
+      "文件和文件夹右键多一项「用 NifeCode 打开」：选文件夹就当工作区打开、选文件就直接打开。" +
+        "Win11 新版右键菜单只认打包应用，这一项在「显示更多选项」里" +
+        (installed ? "" : "；便携版的菜单记的是当前 exe 路径，移动/改名后要关一次再开一次"),
       check("set-shell-menu", menuOn)
     )
   );

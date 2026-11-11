@@ -67,6 +67,7 @@ pub fn run() {
             fsops::ssh_forget_host,
             shell::shell_menu_set,
             shell::shell_menu_state,
+            shell::is_installed,
             shell::startup_target,
             cache::app_cache_size,
             cache::app_cache_clear,
