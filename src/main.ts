@@ -5,6 +5,7 @@ import { chromeIcon, iconFor, iconSvg, uiIcon } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
@@ -102,10 +103,6 @@ function newLocalContext(): Ctx {
   const c: Ctx = { id: `local:${ctxSeq}`, kind: "local", label: `本机 ${ctxSeq}`, host: null, port: 22, root: null };
   contexts.push(c);
   return c;
-}
-
-async function pickFolder(): Promise<string | null> {
-  return await invoke<string | null>("pick_folder").catch(() => null);
 }
 
 /** 从上次会话恢复出来、还没连上的 SSH 标签：这时候别去碰它，否则每 5 秒一次 ssh 握手/弹密码 */
@@ -605,6 +602,8 @@ function applyEditorSettings() {
 
 async function showSettings() {
   const shells = shellList.length ? shellList : await loadShells();
+  // 右键菜单的开关以注册表为准（用户可能自己手动删了）
+  const menuOn = await invoke<boolean>("shell_menu_state").catch(() => false);
   const rows: string[] = [];
   const row = (k: string, hint: string, v: string) =>
     `<div class="set-row"><div class="k"><b>${k}</b><span>${hint}</span></div><div class="v">${v}</div></div>`;
@@ -649,6 +648,15 @@ async function showSettings() {
   rows.push(sec("常规"));
   rows.push(row("关闭前确认", "有未保存的更改时询问", check("set-confirm", settings.confirmClose)));
   rows.push(row("会话恢复", "异常退出后恢复未保存内容", check("set-snapshot", settings.snapshot)));
+
+  rows.push(sec("系统集成"));
+  rows.push(
+    row(
+      "资源管理器右键",
+      "文件和文件夹右键多一项「用 NifeCode 打开」，选文件夹就当工作区打开、选文件就直接打开（Win11 在「显示更多选项」里）",
+      check("set-shell-menu", menuOn)
+    )
+  );
 
   rows.push(sec("存储"));
   rows.push(
@@ -702,6 +710,18 @@ async function showSettings() {
   on<HTMLInputElement>("set-snapshot")?.addEventListener("change", (e) => {
     settings.snapshot = (e.target as HTMLInputElement).checked;
     save("snapshot", settings.snapshot ? "1" : "0");
+  });
+  on<HTMLInputElement>("set-shell-menu")?.addEventListener("change", async (e) => {
+    const cb = e.target as HTMLInputElement;
+    cb.disabled = true;
+    try {
+      await invoke("shell_menu_set", { on: cb.checked });
+      setMsg(cb.checked ? "已加入资源管理器右键菜单" : "已从资源管理器右键菜单移除");
+    } catch (err) {
+      cb.checked = !cb.checked; // 失败就还原，别让人以为改好了
+      setMsg(`改右键菜单失败：${err}`);
+    }
+    cb.disabled = false;
   });
 
   // 缓存：进来算一次大小，清理后重算
@@ -768,16 +788,18 @@ editor.setCtx(activeId);
 
 // ---------- 标签页 ----------
 
-// ---------- 远端文件夹选择器（SSH 用）----------
-async function pickRemoteFolder(start: string): Promise<string | null> {
+// ---------- 文件夹选择器（本机 / 远端共用，不走系统对话框：有些机器弹资源管理器很卡）----------
+async function pickFolder(start?: string): Promise<string | null> {
+  // 本机没打开工作区时先落到用户目录：Windows 的 "/" 是当前盘根，拿去当工作区很奇怪
+  const from = start || (host ? "/" : (await invoke<string | null>("home_dir").catch(() => null)) ?? "/");
   const m = $("#modal");
-  m.querySelector(".title")!.textContent = "打开远端文件夹";
+  m.querySelector(".title")!.textContent = host ? "打开远端文件夹" : "打开文件夹";
   const body = m.querySelector(".body") as HTMLDivElement;
   const acts = m.querySelector(".actions") as HTMLDivElement;
   body.style.whiteSpace = "normal";
   body.innerHTML = `
     <div class="pk-path">
-      <input id="pk-input" spellcheck="false" placeholder="/home/user/project" />
+      <input id="pk-input" spellcheck="false" placeholder="${host ? "/home/user/project" : "D:/projects/xxx"}" />
     </div>
     <div id="pk-list" class="pk-list"></div>`;
   acts.innerHTML = "";
@@ -785,7 +807,7 @@ async function pickRemoteFolder(start: string): Promise<string | null> {
 
   const input = body.querySelector("#pk-input") as HTMLInputElement;
   const list = body.querySelector("#pk-list") as HTMLDivElement;
-  let cur = start;
+  let cur = from;
 
   const addRow = (label: string, onPick: () => void, isDir: boolean) => {
     const row = document.createElement("div");
@@ -850,7 +872,7 @@ async function pickRemoteFolder(start: string): Promise<string | null> {
     // 点遮罩关掉
     m.onclick = (ev) => { if (ev.target === m) done(null); };
 
-    void go(start);
+    void go(from);
     input.focus();
     input.select();
   });
@@ -926,6 +948,33 @@ async function closeMany(paths: string[]) {
     await closeTab(p);
     if (editor.docsFor(p)) return; // 还开着 = 用户点了取消
   }
+}
+
+/**
+ * 磁盘上已经没了的东西（删除）：指向它的标签直接关掉，**不问保存** ——
+ * 文件都不在了，这时候存一下就是把它又写回去。
+ */
+function closeGone(paths: string[]) {
+  if (!paths.length) return;
+  const key = (p: string) => (host === null ? cleanPath(p).toLowerCase() : cleanPath(p));
+  const under = (p: string) => paths.some((d) => {
+    // 同一个文件可能被不同写法开过（盘符大小写/反斜杠），比之前先统一一下
+    const dd = key(d);
+    return key(p) === dd || key(p).startsWith(`${dd.replace(/[\/]+$/, "")}/`);
+  });
+  const cur = editor.current()?.path;
+  const order = editor.paths();
+  for (const p of editor.allPaths()) if (under(p)) editor.close(p);
+  if (!cur || !under(cur)) {
+    renderTabs(); // 关的不是当前标签，重画一遍就完事
+    return;
+  }
+  // 关的是正在看的那个：落到它右边还开着的标签，没有了就取最后一个（VS Code 也是这样）
+  const left = editor.paths();
+  const i = order.indexOf(cur);
+  const next = left.find((p) => order.indexOf(p) > i) ?? left[left.length - 1];
+  if (next) editor.show(next);
+  renderTabs();
 }
 
 /** 左上角主菜单（点 logo / 品牌名出来） */
@@ -1173,6 +1222,7 @@ const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
 const DOC_EXT = ["docx", "pptx", "doc", "ppt"];
 
 async function openFile(path: string, line?: number) {
+  path = openAs(path); // 同一个文件换个写法又开一次 → 回到已经开着的那份，不再堆一个新标签
   if (editor.has(path)) {
     editor.show(path);
     if (line) editor.revealLine(line);
@@ -1540,6 +1590,41 @@ function joinPath(dir: string, name: string): string {
   return `${dir.replace(/[\/]+$/, "")}/${name}`;
 }
 
+/**
+ * 同一条路径的不同写法（反斜杠、`./..`、重复斜杠、小写盘符）统一成一种。
+ * 不做文件系统查询（不 stat、不改大小写）：只是为了比“是不是同一个文件”。
+ */
+function cleanPath(p: string): string {
+  const raw = p.replace(/\\/g, "/");
+  // UNC（\\server\share）/ 去掉开头多余斜杠前先认出来，别把它当成普通路径
+  const head = raw.startsWith("//") && raw[2] !== "/" ? "//" : raw.startsWith("/") ? "/" : "";
+  const out: string[] = [];
+  for (const seg of raw.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      // 盘符（"D:"）和根（"/"）的上一级还是自己
+      if (out.length && !(out.length === 1 && /^[A-Za-z]:$/.test(out[0]))) out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return (head + out.join("/")).replace(/^([a-z]):/, (_m, d: string) => `${d.toUpperCase()}:`);
+}
+
+/**
+ * 这个路径对应的已打开标签（同一个文件用不同写法开过就复用那一份）。
+ * 本机（Windows）不区分大小写，远端按原样比 —— 远端 linux 上 `a.ts` 和 `A.ts` 是两个文件。
+ */
+function openAs(path: string): string {
+  const key = (p: string) => {
+    const s = cleanPath(p);
+    const h = editor.docsFor(p)?.host ?? host;
+    return h === null ? s.toLowerCase() : s;
+  };
+  const k = key(path);
+  return editor.allPaths().find((p) => key(p) === k) ?? cleanPath(path);
+}
+
 async function askText(title: string, label: string, value = "", placeholder = ""): Promise<string | null> {
   const r = await ask(title, `<label>${label}</label><input id="mt-name" value="${value.replace(/"/g, "&quot;")}" placeholder="${placeholder}" />`, [
     { label: "确定", value: "ok", primary: true },
@@ -1650,15 +1735,18 @@ async function deleteEntry(paths: string[]) {
   ]);
   if (r !== "ok") return;
   let done = 0;
+  const gone: string[] = [];
   for (const p of paths) {
     try {
       await invoke("fs_delete", { ...connArg(), path: p });
       sel.delete(p);
+      gone.push(p);
       done += 1;
     } catch (err) {
       setMsg(`删除失败：${baseName(p)} —— ${err}`);
     }
   }
+  closeGone(gone);
   await refreshTree();
   if (done) setMsg(one ? `已删除 ${paths[0]}` : `已删除 ${done} 项`);
 }
@@ -1852,6 +1940,8 @@ async function claimRoot(next?: string): Promise<boolean> {
 }
 
 async function openRoot(path: string) {
+  // 统一成正斜杠：右键菜单/命令行/手输都可能给反斜杠，混着会导致树里路径和标签路径对不上
+  path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
   if (!(await claimRoot(path))) {
     setMsg("这个项目已经在另一个窗口打开了，已经切过去");
     return;
@@ -2674,11 +2764,12 @@ async function boot() {
   $<HTMLButtonElement>("#ctx-new").onclick = async () => {
     saveCtxs();
     const prev = activeId;
+    const from = root; // 新标签从当前看的工作区位置开始浏览（更像人找文件夹的习惯）
     const c = newLocalContext();
     activeId = c.id;
     applyActive();
     renderCtxBar();
-    const dir = await pickFolder();
+    const dir = await pickFolder(from ?? undefined);
     if (!dir) {
       // 取消了就别留空标签
       contexts.splice(contexts.indexOf(c), 1);
@@ -2765,6 +2856,18 @@ async function boot() {
   void loadShells();
   if (terms.count() === 0) void terms.newPage(true);
 
+  // 资源管理器右键菜单「用 NifeCode 打开」：文件夹当工作区，文件直接打开（没工作区就拿它所在目录当）
+  void (async () => {
+    const t = await invoke<{ path: string; is_dir: boolean } | null>("startup_target").catch(() => null);
+    if (!t) return;
+    if (t.is_dir) await openRoot(t.path);
+    else {
+      // 从资源管理器点的是个文件：把它所在目录当工作区（不然文件树是空/无关的），再打开它
+      await openRoot(parentOf(t.path));
+      await openFile(t.path);
+    }
+  })();
+
   $<HTMLButtonElement>("#btn-ssh-new").onclick = () => void editProfile();
   renderSsh();
 
@@ -2804,20 +2907,11 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLButtonElement>("#btn-open-folder").onclick = async () => {
-    if (host) {
-      // SSH：弹一个远端目录浏览器，选完直接切工作区
-      const dir = await pickRemoteFolder(root ?? "/");
-      if (dir) {
-        await openRoot(dir);
-        setMsg(`工作区：${dir}`);
-      }
-      return;
-    }
-    const dir = await pickFolder();
-    if (dir) {
-      await openRoot(dir);
-      saveCtxs();
-    }
+    // 本机也叫自带的浏览弹窗：系统那个资源管理器框在部分机器上要转好几秒
+    const dir = await pickFolder(root ?? undefined);
+    if (!dir) return;
+    await openRoot(dir);
+    setMsg(`工作区：${dir}`);
   };
 
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
@@ -2849,7 +2943,9 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     (e) => {
       if (!imgView || !e.ctrlKey || e.altKey) return;
       if (e.key !== "-" && e.key !== "_" && e.key !== "+" && e.key !== "=") return;
+      // 不 stop 的话，下面那个「界面字号」的捕获监听会接着跑，预览里按 Ctrl+- 会连整个界面一起缩小
       e.preventDefault();
+      e.stopPropagation();
       const r = imgView.img.getBoundingClientRect();
       const step = e.key === "-" || e.key === "_" ? 1 / 1.25 : 1.25;
       imgZoom(imgView.scale * step, r.left + r.width / 2, r.top + r.height / 2);
@@ -3072,6 +3168,17 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     else if (e.key === "0") { e.preventDefault(); e.stopPropagation(); bumpFont("reset"); }
   }, true);
 
+  // 从资源管理器把文件拖进窗口 → 直接打开（不需要先打开工作区；路径是系统给的绝对路径）
+  await getCurrentWebview().onDragDropEvent((e) => {
+    if (e.payload.type !== "drop") return;
+    // 拖进来的都是本机文件：当前标签连着 SSH 就先切回本机标签，别把本地路径送到远端去读
+    if (host !== null) {
+      const local = contexts.find((c) => c.kind === "local");
+      if (local) switchContext(local.id);
+    }
+    for (const p of e.payload.paths) void openFile(p);
+  });
+
   await listen<{ path: string; line?: number }>("bridge:open", (e) => {
     // 相对路径按工作区根算，别落到编辑器进程的 cwd 上
     const p = e.payload.path.replace(/\\/g, "/");
@@ -3081,7 +3188,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   // 外面（agent）要保存文件：写完把结果回给 Rust，HTTP 那边才回 200/500
   await listen<{ path?: string }>("bridge:save", async (e) => {
     const want = e.payload?.path;
-    const targets = want ? [want] : editor.dirtyPaths();
+    const targets = want ? [openAs(want)] : editor.dirtyPaths();
     const saved: string[] = [];
     const errors: { path: string; error: string }[] = [];
     for (const p of targets) {

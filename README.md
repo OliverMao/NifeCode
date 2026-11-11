@@ -38,7 +38,8 @@ Windows 下 release 版常驻内存实测：**175MB**（编辑器 + 文件树 + 
   结果按**文件分组**（文件名 + 命中数徽标），每行前面是行号、命中的词紫色高亮，点文件跳到第一处、点某行跳到那一行；顶部一行汇总「N 处匹配 · M 个文件」（超 200 处会标出已达上限）
 - **全项目替换**：搜索框下面填“替换为”，点「全部替换」或回车；本地/远端都支持，**按每个文件自己的编码写回**（GBK 文件不会变成 UTF-8），改完把已经打开且没改动的编辑器重新读一遍
 - **终端内查找**：终端里 `Ctrl+F` 弹出小查找条（`↑`/`↓`/Enter 下一个/Shift+Enter 上一个，Esc 关闭）；有不认识的高度限制就不会顶乱终端布局
-- **图片预览**：点 `.png/.jpg/.gif/.webp/.bmp/.ico/.svg` 直接看图（带尺寸和 KB 数，本地/远端都行），不占编辑器标签
+- **图片预览**：点 `.png/.jpg/.gif/.webp/.bmp/.ico/.svg` 直接看图（带尺寸和 KB 数，本地/远端都行），不占编辑器标签；
+  `Ctrl+滚轮`按鼠标位置缩放、`Ctrl+=` / `Ctrl+-` 按中心缩放（10%~1600%，下限=刚好铺满）
 - **超大文件**：超过 8MB 也能打开，但**以只读方式**（状态栏会提示），避免一键把 100MB 日志拖进来卡死；96MB 以上才拒绝
 - **Word / PowerPoint 真渲染**：点 `.docx` / `.pptx` 直接在编辑器区看原样排版（Word 的段落/表格/图片/页眉页脚、
   PPT 的每张幻灯片），本地和 SSH 远端都行。用的是 `docx-preview`(Apache-2.0) 和 `pptx-preview`(ISC)，
@@ -54,6 +55,10 @@ Windows 下 release 版常驻内存实测：**175MB**（编辑器 + 文件树 + 
 - **端口转发**：把 GPU 服务器上的 Jupyter / TensorBoard 映射到本地（命令面板 → 端口转发，或状态栏点转发标记停止）
 - **源代码管理**：左侧 ⎇ 面板，显示分支、变更文件列表；点文件直接打开，`⇄` 和 HEAD 对比；底部填提交信息（`Ctrl+Enter`）一键 `add -A` + commit
 - **Agent Bridge**：本地 HTTP 接口，让 agent 打开文件、给修改方案看 diff
+- **资源管理器右键「用 NifeCode 打开」**：设置 → 系统集成里一键开/关（只写 `HKCU\Software\Classes`，不需要管理员）。
+  选文件夹就把它当工作区，选文件就直接打开（顺便把它所在目录当工作区）；已经有窗口在跑时把路径转给那个窗口，不再开第二个实例。
+  Win11 的新版右键菜单只认打包应用，这个条目在**「显示更多选项」**（`Shift+F10`）里。
+  菜单里记的是**当前 exe 的完整路径**：移动/改名 exe 之后要关掉再开一次
 
 ## 跑起来
 
@@ -73,6 +78,18 @@ pnpm build && cd src-tauri && cargo build --release --features custom-protocol
 `--features custom-protocol` 不能省，否则 release 版会去连 `localhost:1420`（`tauri build` 会自动加）。
 
 > ⚠️ release 二进制把 `dist/` **编译时内嵌**。改了前端只跑 `pnpm build` 是不会生效的，必须重新 `cargo build --release`（或者干脆用 `pnpm tauri dev`，Vite 热更新）。
+
+### 测试
+
+```bash
+cd src-tauri && cargo test        # 后端：解析/主机指纹这些纯函数
+node scripts/test-cleanpath.mjs   # 路径去重用的 cleanPath
+# UI 冒烟测试：需要一个带远程调试端口的窗口
+cd src-tauri/target/release && WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 ./nifecode.exe
+node scripts/test-ui.mjs          # 选择器 / 文件树展开 / 去重 / 图片缩放 / 删除 / 拖拽
+```
+
+UI 测试会临时把工作区切到 `<repo>/.probe/ws`（gitignored）并自己造测试文件，跑完切回原来的工作区。
 
 前提：Rust（MSVC 工具链）+ Node 18+ + WebView2（Win11 自带）。
 

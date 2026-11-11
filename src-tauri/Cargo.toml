@@ -1,6 +1,6 @@
 [package]
 name = "nifecode"
-version = "0.1.8"
+version = "0.1.9"
 description = "轻量 VS Code 兼容编辑器（本地 + SSH + 终端 + Agent Bridge）"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -19,7 +19,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8"
 base64 = "0.22"
-rfd = "0.15"
 # 进程内读 git 状态：实测 0.8ms vs 每次 spawn git 37.8ms
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }

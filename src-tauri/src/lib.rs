@@ -5,6 +5,7 @@ mod cache;
 mod fsops;
 mod proc;
 mod session;
+mod shell;
 mod fwd;
 mod git;
 mod pty;
@@ -12,6 +13,12 @@ mod update;
 mod win;
 
 pub fn run() {
+    // 右键菜单「用 NifeCode 打开」起的新实例：已经有窗口在跑就把路径转给它，本进程直接退出
+    if let Some(p) = shell::arg_path() {
+        if shell::forward_to_running(&p) {
+            return;
+        }
+    }
     tauri::Builder::default()
         .manage(pty::PtyState::default())
         .manage(bridge::BridgeState::default())
@@ -44,7 +51,7 @@ pub fn run() {
             fwd::fwd_list,
             fwd::fwd_stop,
             fwd::fwd_stop_all,
-            fsops::pick_folder,
+            fsops::home_dir,
             fsops::ssh_home,
             fsops::ssh_set_identity,
             fsops::ssh_close,
@@ -58,6 +65,9 @@ pub fn run() {
             fsops::read_binary,
             fsops::fs_open,
             fsops::ssh_forget_host,
+            shell::shell_menu_set,
+            shell::shell_menu_state,
+            shell::startup_target,
             cache::app_cache_size,
             cache::app_cache_clear,
             fsops::ssh_save_password,

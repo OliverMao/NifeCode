@@ -565,12 +565,13 @@ pub async fn stat_file(host: Option<String>, port: u16, path: String) -> Result<
     }
 }
 
+/// 本机用户目录（选文件夹弹窗的起始位置；Windows 上就是 %USERPROFILE%）
 #[tauri::command]
-pub fn pick_folder() -> Option<String> {
-    rfd::FileDialog::new()
-        .set_title("打开文件夹")
-        .pick_folder()
-        .map(|p| p.to_string_lossy().to_string())
+pub fn home_dir() -> Option<String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(|h| h.replace('\\', "/"))
 }
 
 /// 在 Windows 资源管理器里定位/打开（远端没有这个能力，前端会隐藏菜单项）
@@ -990,5 +991,36 @@ fn copy_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Resu
         Ok(())
     } else {
         std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_alias_is_per_port() {
+        // 22 端口保持原样（跟 ssh 自己的写法一致），其它端口带方括号端口
+        assert_eq!(host_alias("10.0.0.1", 22), "10.0.0.1");
+        assert_eq!(host_alias("10.0.0.1", 2222), "[10.0.0.1]:2222");
+        // 同一个 IP 不同端口必须是两条不同的记录，否则指纹会互相顶掉
+        assert_ne!(host_alias("10.0.0.1", 22), host_alias("10.0.0.1", 2222));
+        assert_ne!(host_alias("10.0.0.1", 2222), host_alias("10.0.0.1", 2223));
+    }
+
+    #[test]
+    fn known_host_args_point_at_our_own_file() {
+        let args = known_host_args("example.com", 2222);
+        let joined = args.join(" ");
+        // 路径里不能有反斜杠：ssh 在 Windows 上对反斜杠支持不稳
+        let kh = joined
+            .split(' ')
+            .find(|a| a.starts_with("UserKnownHostsFile="))
+            .expect("缺少 UserKnownHostsFile");
+        assert!(kh.ends_with("nifecode_known_hosts"), "{kh}");
+        assert!(!kh.contains('\\'), "{kh}");
+        // 指纹按 host:port 分开存，并且不再按 IP 记第二条
+        assert!(joined.contains("HostKeyAlias=[example.com]:2222"), "{joined}");
+        assert!(joined.contains("CheckHostIP=no"), "{joined}");
     }
 }
