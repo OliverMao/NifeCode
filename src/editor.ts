@@ -46,6 +46,28 @@ export function languageOf(path: string): string {
   return LANG[ext] ?? "plaintext";
 }
 
+// 文本里的超链接：Ctrl+点击能点（URL 最后交回宿主，和终端 Ctrl+点击同一个入口）
+const URL_RE = /https?:\/\/[^\s"'`<>()\[\]]+/g;
+
+monaco.languages.registerLinkProvider("*", {
+  provideLinks(model) {
+    const links: monaco.languages.ILink[] = [];
+    const lines = model.getLinesContent();
+    for (let i = 0; i < lines.length; i++) {
+      URL_RE.lastIndex = 0;
+      for (let m; (m = URL_RE.exec(lines[i])); ) {
+        const url = m[0].replace(/[.,;:!?]+$/, ""); // 句末标点不算链接
+        links.push({
+          range: { startLineNumber: i + 1, startColumn: m.index + 1, endLineNumber: i + 1, endColumn: m.index + url.length + 1 },
+          url,
+          tooltip: "Ctrl+点击打开链接",
+        });
+      }
+    }
+    return { links };
+  },
+});
+
 export interface Doc {
   path: string;
   model: monaco.editor.ITextModel;
@@ -127,7 +149,17 @@ export class EditorHost {
     onDirty: (path: string, dirty: boolean) => void,
     onCursor: (line: number, col: number) => void,
     onSave: () => void,
+    onLink: (text: string) => void,
   ) {
+    // 链接的 Ctrl+点击最终走到这里；只认 http(s)，别的返回 false 交回 monaco 默认处理
+    monaco.editor.registerLinkOpener({
+      open: (res) => {
+        const text = res.toString(true);
+        if (!/^https?:\/\//i.test(text)) return false;
+        onLink(text);
+        return true;
+      },
+    });
     this.ed = monaco.editor.create(el, {
       theme: "vs-dark",
       automaticLayout: true,
@@ -167,6 +199,12 @@ export class EditorHost {
     const model = this.ed.getModel();
     if (!model) return undefined;
     return this.allDocs().find((d) => d.model === model);
+  }
+
+  /** 预览面板等要跟着「当前文档变了 / 内容变了」动一下：两件事都通知 */
+  onDocChange(cb: () => void) {
+    this.ed.onDidChangeModel(() => cb());
+    this.ed.onDidChangeModelContent(() => cb());
   }
 
   /** 这个文件当前开在哪个上下文里（崩溃恢复按它还原） */

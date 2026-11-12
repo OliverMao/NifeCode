@@ -9,6 +9,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
+import { renderMarkdown } from "monaco-editor/esm/vs/base/browser/markdownRenderer.js";
 import { TerminalHost } from "./terminal";
 
 interface Entry { name: string; path: string; is_dir: boolean }
@@ -363,6 +364,9 @@ function renderStatusInfo() {
   eol.textContent = d ? editor.eolOf(d.path) : "";
   enc.style.display = d ? "" : "none";
   eol.style.display = d ? "" : "none";
+  const md = $<HTMLSpanElement>("#st-md");
+  md.style.display = isMarkdown(d?.path) ? "" : "none";
+  md.classList.toggle("on", !!mdPreview);
 }
 
 /** 换编码重新读盘（有未保存改动先问） */
@@ -785,9 +789,11 @@ const editor = new EditorHost(
     $<HTMLSpanElement>("#st-pos").textContent = `行 ${line}，列 ${col}`;
     (window as any).__cur = { line, column: col }; // 给 bridge 的 cursor 用
   },
-  () => void saveCurrent()
+  () => void saveCurrent(),
+  (text) => void openLink(text)
 );
 editor.setCtx(activeId);
+editor.onDocChange(() => syncMdPreview());
 
 // ---------- 标签页 ----------
 
@@ -1059,6 +1065,7 @@ async function mountDiff(t: DiffTab) {
   diffShownId = t.id;
   const h = diffHost();
   $("#editor").classList.add("hidden");
+  closeMdPreview(); // diff 铺上来时预览没意义
   h.classList.remove("hidden");
   const { monaco } = await import("./editor");
   if (!diffEd) {
@@ -1221,8 +1228,8 @@ function renderTabs(activePath?: string) {
 
 // ---------- 打开 / 保存 ----------
 const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
-// docx/pptx 走纯文字预览；doc/ppt 是老二进制格式，只能甩给系统程序
-const DOC_EXT = ["docx", "pptx", "doc", "ppt"];
+// docx/pptx/pdf 走预览；doc/ppt 是老二进制格式，只能甩给系统程序
+const DOC_EXT = ["docx", "pptx", "doc", "ppt", "pdf"];
 
 async function openFile(path: string, line?: number) {
   path = openAs(path); // 同一个文件换个写法又开一次 → 回到已经开着的那份，不再堆一个新标签
@@ -1364,6 +1371,7 @@ let docViewer: { destroy(): void } | null = null;
 // 页面按真实宽度渲染（docx 800px 上下、pptx 960px），中栏往往没这么宽 → 按比例缩到刚好放下
 let docZoomEl: HTMLElement | null = null;
 let docNaturalW = 0;
+let pdfUrl: string | null = null; // PDF 的 blob URL，关预览时要 revoke 掉
 
 function fitDoc() {
   if (!docZoomEl) return;
@@ -1399,7 +1407,7 @@ async function openDoc(path: string, ext: string) {
   closeDoc();
   const box = document.createElement("div");
   box.id = "doc-view";
-  box.className = ext === "docx" ? "word" : "ppt";
+  box.className = ext === "docx" ? "word" : ext === "pptx" ? "ppt" : "pdf";
   box.innerHTML = `<div class="hd"><span class="nm"></span><span class="spacer"></span><span class="sz"></span><span class="x" title="关闭（Esc）">✕</span></div><div class="bd"></div>`;
   const nm = box.querySelector(".nm") as HTMLElement;
   nm.textContent = baseName(path);
@@ -1411,6 +1419,23 @@ async function openDoc(path: string, ext: string) {
   try {
     const b64 = await invoke<string>("read_binary", { host: c.host, port: c.port, path });
     const buf = b64ToBuffer(b64);
+    if (ext === "pdf") {
+      // 不引 pdf.js：WebView2 就是 Chromium，自带 PDF 阅读器（缩放/搜索/页码都有）
+      pdfUrl = URL.createObjectURL(new Blob([buf], { type: "application/pdf" }));
+      const frame = document.createElement("iframe");
+      frame.title = baseName(path);
+      frame.src = pdfUrl;
+      bd.appendChild(frame);
+      sz.textContent = `${Math.round((b64.length * 3) / 4 / 1024)} KB`;
+      // 阅读器万一不可用（旧 WebView2）时还有条退路
+      const extBtn = document.createElement("span");
+      extBtn.className = "x";
+      extBtn.textContent = "用系统程序打开";
+      extBtn.onclick = () => openExternal(path);
+      sz.before(extBtn);
+      setMsg(path);
+      return;
+    }
     if (ext === "docx") {
       // 两个库都按需 import：不开 office 文件就一行都不加载
       const { renderAsync } = await import("docx-preview");
@@ -1457,6 +1482,8 @@ async function openDoc(path: string, ext: string) {
 }
 
 function closeDoc() {
+  if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+  pdfUrl = null;
   window.removeEventListener("resize", fitDoc);
   docViewer?.destroy();
   docViewer = null;
@@ -1472,6 +1499,65 @@ function openExternal(path: string) {
     return;
   }
   void invoke("fs_open", { path }).catch((e) => setMsg(`打不开：${e}`));
+}
+
+// ---------- Markdown 实时预览 ----------
+// 解析/清洗用 monaco 内部自带的 marked + DOMPurify（不额外装依赖），渲染结果里只剩安全标签
+const isMarkdown = (path?: string) => !!path && /\.(md|markdown)$/i.test(path);
+let mdPreview: { path: string; el: HTMLElement; timer: number; dispose: () => void } | null = null;
+
+function renderMdPreview() {
+  const p = mdPreview;
+  const d = editor.current();
+  if (!p || !d || d.path !== p.path) return;
+  const rendered = renderMarkdown(
+    { value: d.model.getValue(), isTrusted: false, supportHtml: false },
+    {
+      // 链接点一下就走和终端/编辑器 Ctrl+点击 同一个入口
+      actionHandler: { callback: (href) => void openLink(href), disposables: { add: (d) => d } },
+      fillInIncompleteTokens: true, // 正在输入的 ``` / 表格不至于整块跳走
+    }
+  );
+  const top = p.el.scrollTop; // 重排后保住滚动位置，否则每打一个字都弹回顶部
+  p.dispose();
+  p.dispose = rendered.dispose;
+  p.el.replaceChildren(rendered.element);
+  p.el.scrollTop = top;
+}
+/** 当前文档变了/内容变了：预览只跟着它当初打开的那份走，别的文件直接关掉 */
+function syncMdPreview() {
+  if (!mdPreview) return;
+  if (editor.current()?.path !== mdPreview.path) return closeMdPreview();
+  clearTimeout(mdPreview.timer);
+  mdPreview.timer = window.setTimeout(renderMdPreview, 200); // 打字时别每个按键都重排一遍
+}
+
+function toggleMdPreview() {
+  if (mdPreview) return closeMdPreview();
+  const d = editor.current();
+  if (!d) return;
+  if (!isMarkdown(d.path)) {
+    setMsg("Markdown 预览只能用在 .md 文件上");
+    return;
+  }
+  const el = document.createElement("div");
+  el.id = "md-preview";
+  $("#main").appendChild(el);
+  $("#main").classList.add("md-split");
+  mdPreview = { path: d.path, el, timer: 0, dispose: () => {} };
+  renderMdPreview();
+  renderStatusInfo();
+  setMsg("Markdown 预览（Ctrl+Shift+V 关闭）");
+}
+
+function closeMdPreview() {
+  if (!mdPreview) return;
+  clearTimeout(mdPreview.timer);
+  mdPreview.dispose();
+  mdPreview.el.remove();
+  $("#main").classList.remove("md-split");
+  mdPreview = null;
+  renderStatusInfo();
 }
 
 /** 真正写盘，失败会抛（bridge 的 /save 要知道成功与否） */
@@ -2209,6 +2295,8 @@ async function connectProfile(p: SshProfile, retried = false) {
       setConnLabel();
       renderSsh();
       await openRoot(c.root!);
+      // 连上就别把人留在 SSH 菜单页了，直接看文件树
+      document.querySelector<HTMLButtonElement>('#activity button[data-act="explorer"]')?.click();
       setMsg(`已连接 ${p.name}（${c.root}）`);
     } catch (e) {
       // 连不上就把这个空标签收回，别再留个死标签（上次会话恢复出来的除外，用户下次还能再点）
@@ -2973,6 +3061,13 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       void quickOpen();
       return;
     }
+    if (e.ctrlKey && e.shiftKey && (e.key === "v" || e.key === "V")) {
+      const t = e.target as HTMLElement | null;
+      if (t && typeof t.closest === "function" && t.closest("#term-col, input, textarea")) return; // 终端/输入框里这个键是粘贴
+      e.preventDefault();
+      toggleMdPreview();
+      return;
+    }
     // 标签：Ctrl+W 关、Ctrl+Tab / Ctrl+Shift+Tab 切换、Ctrl+1~9 跳
     if (e.ctrlKey && !e.shiftKey && (e.key === "w" || e.key === "W")) {
       e.preventDefault();
@@ -3010,6 +3105,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   });
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
+  $<HTMLSpanElement>("#st-md").onclick = () => toggleMdPreview();
   // 自定义标题栏的三个按钮（SVG 自绘，跟其它图标同一套笔画）
   const WIN_ICON = {
     min: '<svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg>',
