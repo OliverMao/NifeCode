@@ -468,6 +468,12 @@ pub async fn read_file(
     }
 }
 
+/// explorer.exe / start 只认反斜杠：喂 `D:/a/b` 它当无效路径，直接打开"此电脑"或用户目录
+#[cfg(windows)]
+fn win_native(path: &str) -> String {
+    path.replace('/', "\\")
+}
+
 /// 用系统默认程序打开（本机才有）
 #[tauri::command]
 pub fn fs_open(path: String) -> Result<(), String> {
@@ -478,7 +484,7 @@ pub fn fs_open(path: String) -> Result<(), String> {
     {
         use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path])
+            .args(["/C", "start", "", &win_native(&path)])
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -584,12 +590,13 @@ pub fn fs_reveal(path: String) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        let native = win_native(&path);
         let mut cmd = std::process::Command::new("explorer.exe");
         if p.is_dir() {
-            cmd.arg(&path);
+            cmd.arg(&native);
         } else {
             // /select, 和路径必须连在一起，参数里的空格交给系统解析
-            cmd.raw_arg(format!("/select,\"{path}\""));
+            cmd.raw_arg(format!("/select,\"{native}\""));
         }
         crate::proc::hide_console(&mut cmd);
         // explorer.exe 总是返回非 0，能启动就算成功
@@ -640,6 +647,27 @@ fn guard_size(size: u64, path: &str) -> Result<bool, String> {
 
 const SKIP_DIRS: [&str; 9] = [".git", "node_modules", "target", "dist", "build", ".venv", "__pycache__", ".idea", ".next"];
 
+/// 在原始字节里找子串（先扫首字节，避免每个位置都 memcmp）
+fn has_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, rest)) = needle.split_first() else { return false };
+    if hay.len() < needle.len() {
+        return false;
+    }
+    let mut i = 0;
+    while let Some(p) = hay[i..].iter().position(|&b| b == first) {
+        let at = i + p;
+        let end = at + needle.len();
+        if end > hay.len() {
+            return false;
+        }
+        if &hay[at + 1..end] == rest {
+            return true;
+        }
+        i = at + 1;
+    }
+    false
+}
+
 /// 本地递归：走 ignore 的遍历器，.gitignore / .ignore / git 全局忽略统统生效（跟 ripgrep 一个引擎）
 fn walker(root: &std::path::Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(root)
@@ -652,6 +680,7 @@ fn walker(root: &std::path::Path) -> impl Iterator<Item = ignore::DirEntry> {
 }
 
 fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<SearchHit>) {
+    let needle = query.as_bytes();
     for e in walker(root) {
         if out.len() >= max {
             return;
@@ -663,6 +692,10 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
         let Ok(bytes) = std::fs::read(e.path()) else { continue };
         if bytes.iter().take(4096).any(|&b| b == 0) {
             continue; // 二进制
+        }
+        // 先在原始字节里找一遍：没命中就不做编码探测和解码（大仓里绝大多数文件都是这一支）
+        if !has_bytes(&bytes, needle) {
+            continue;
         }
         let (text, _) = decode_bytes(&bytes, None);
         for (i, line) in text.lines().enumerate() {
@@ -683,6 +716,7 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
 /// 把本地文件里的 query 换成 replacement，返回动过的文件（相对路径）
 fn walk_replace(root: &std::path::Path, query: &str, to: &str, max: usize) -> Vec<String> {
     let mut changed = Vec::new();
+    let needle = query.as_bytes();
     for e in walker(root) {
         if changed.len() >= max {
             break;
@@ -693,6 +727,9 @@ fn walk_replace(root: &std::path::Path, query: &str, to: &str, max: usize) -> Ve
         }
         let Ok(bytes) = std::fs::read(e.path()) else { continue };
         if bytes.iter().take(4096).any(|&b| b == 0) {
+            continue;
+        }
+        if !has_bytes(&bytes, needle) {
             continue;
         }
         let (text, enc) = decode_bytes(&bytes, None);
@@ -756,6 +793,73 @@ pub async fn list_files(
                     .collect();
             }
             Ok(lines)
+        }
+    }
+}
+
+const SKIP_REPO_DIRS: [&str; 8] = [".git", "node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"];
+
+fn walk_repos(dir: &std::path::Path, rel: &str, depth: u32, max_depth: u32, budget: &mut i32, out: &mut Vec<String>) {
+    if *budget <= 0 {
+        return;
+    }
+    *budget -= 1;
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut subs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut is_repo = false;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == ".git" {
+            is_repo = true;
+            continue;
+        }
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            subs.push((name, e.path()));
+        }
+    }
+    if is_repo {
+        out.push(rel.to_string());
+    }
+    if depth >= max_depth {
+        return;
+    }
+    for (name, path) in subs {
+        if name.starts_with('.') || SKIP_REPO_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+        walk_repos(&path, &child, depth + 1, max_depth, budget, out);
+    }
+}
+
+/// 找 git 仓库（SCM 面板的下拉框）：本地在进程内遍历，远端一条 find 搞定
+///
+/// 以前是前端递归 read_dir：每个目录一次 IPC / 一次 ssh 往返，300 个目录在 237ms RTT 上要几分钟
+#[tauri::command]
+pub async fn find_repos(host: Option<String>, port: u16, root: String, depth: u32) -> Result<Vec<String>, String> {
+    let depth = depth.clamp(1, 3);
+    match host {
+        None => {
+            let mut out = Vec::new();
+            let mut budget = 300i32;
+            walk_repos(std::path::Path::new(&root), "", 0, depth, &mut budget, &mut out);
+            Ok(out)
+        }
+        Some(h) => {
+            let cmd = format!(
+                "cd {} && find . -maxdepth {} -name .git -prune -print 2>/dev/null | head -100",
+                shq(&root),
+                depth
+            );
+            let raw = ssh_exec(&h, port, &cmd)?;
+            let mut out = Vec::new();
+            for line in String::from_utf8_lossy(&raw).lines() {
+                // 形如 ./sub/.git 或 ./.git
+                let Some(dir) = line.trim().strip_suffix("/.git") else { continue };
+                let rel = dir.strip_prefix("./").unwrap_or(dir);
+                out.push(if rel == "." { String::new() } else { rel.to_string() });
+            }
+            Ok(out)
         }
     }
 }
@@ -842,9 +946,15 @@ pub async fn search(
     let max = max.clamp(1, 500);
     match host {
         None => {
-            let mut out = Vec::new();
-            walk_search(std::path::Path::new(&cwd), &query, max, &mut out);
-            Ok(out)
+            // 全仓扫描是纯 CPU + 阻塞 IO：直接跑在 async 里会占死一个 tokio worker，
+            // 同时刻的 pty_write（终端输入）、stat_files（文件树轮询）都得排队
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut out = Vec::new();
+                walk_search(std::path::Path::new(&cwd), &query, max, &mut out);
+                out
+            })
+            .await
+            .map_err(|e| e.to_string())
         }
         Some(h) => {
             let cmd = format!(
@@ -1022,5 +1132,40 @@ mod tests {
         // 指纹按 host:port 分开存，并且不再按 IP 记第二条
         assert!(joined.contains("HostKeyAlias=[example.com]:2222"), "{joined}");
         assert!(joined.contains("CheckHostIP=no"), "{joined}");
+    }
+}
+
+#[cfg(test)]
+mod perf_tests {
+    use super::{has_bytes, walk_repos};
+
+    #[test]
+    fn has_bytes_boundaries() {
+        assert!(has_bytes(b"hello world", b"world"));
+        assert!(has_bytes(b"aaa", b"a"));
+        assert!(has_bytes(b"xxab", b"ab")); // 命中贴着尾部
+        assert!(!has_bytes(b"hello", b"world"));
+        assert!(!has_bytes(b"hi", b"hello")); // 比 haystack 长
+        assert!(!has_bytes(b"ab", b"abc")); // 只差一个字节
+        assert!(!has_bytes(b"abc", b"")); // 空串不算命中
+        assert!(!has_bytes(b"", b"x"));
+    }
+
+    #[test]
+    fn walk_repos_skips_heavy_dirs_and_finds_root() {
+        let base = std::env::temp_dir().join(format!("nifecode-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub/.git")).unwrap();
+        std::fs::create_dir_all(base.join("node_modules/x/.git")).unwrap();
+        let mut out = Vec::new();
+        let mut budget = 300;
+        walk_repos(&base, "", 0, 3, &mut budget, &mut out);
+        assert_eq!(out, vec!["sub".to_string()]); // 根不是仓库，node_modules 不进去
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        let mut out2 = Vec::new();
+        let mut budget2 = 300;
+        walk_repos(&base, "", 0, 3, &mut budget2, &mut out2);
+        assert_eq!(out2, vec![String::new(), "sub".to_string()]); // "" = 根目录排第一
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

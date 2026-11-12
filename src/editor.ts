@@ -1,7 +1,45 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
-import * as monaco from "monaco-editor";
+// 只装用得到的部分：整包 monaco 会带上 80 多种语言的注册代码，冷启动白白多解析几 MB。
+// Shortcut: LANG 表里没有的语言（如 purebasic、systemverilog）退化成纯文本，
+// 要加语言就在下面补一行 contribution + LANG 表。
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import "monaco-editor/esm/vs/editor/edcore.main"; // 编辑器功能：查找 / 折叠 / 补全 / 对照…
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+// 走语言服务（各自 worker）的四种
+import "monaco-editor/esm/vs/language/json/monaco.contribution";
+import "monaco-editor/esm/vs/language/css/monaco.contribution";
+import "monaco-editor/esm/vs/language/html/monaco.contribution";
+import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
+// 只有高亮的语言，和下面 LANG 表一一对应。
+// 注意：能用上语言服务的那几个（ts/js/html/css…）也必须在这里注册 id——
+// vs/language/* 只装服务，不注册语言名，以前是靠整包导入基本语言表把 id 带进来的
+import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution";
+import "monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution";
+import "monaco-editor/esm/vs/basic-languages/html/html.contribution";
+import "monaco-editor/esm/vs/basic-languages/css/css.contribution";
+import "monaco-editor/esm/vs/basic-languages/scss/scss.contribution";
+import "monaco-editor/esm/vs/basic-languages/less/less.contribution";
+import "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution";
+import "monaco-editor/esm/vs/basic-languages/python/python.contribution";
+import "monaco-editor/esm/vs/basic-languages/rust/rust.contribution";
+import "monaco-editor/esm/vs/basic-languages/go/go.contribution";
+import "monaco-editor/esm/vs/basic-languages/java/java.contribution";
+import "monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution"; // 同时注册 c 和 cpp
+import "monaco-editor/esm/vs/basic-languages/csharp/csharp.contribution";
+import "monaco-editor/esm/vs/basic-languages/php/php.contribution";
+import "monaco-editor/esm/vs/basic-languages/ruby/ruby.contribution";
+import "monaco-editor/esm/vs/basic-languages/shell/shell.contribution";
+import "monaco-editor/esm/vs/basic-languages/powershell/powershell.contribution";
+import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
+import "monaco-editor/esm/vs/basic-languages/ini/ini.contribution";
+import "monaco-editor/esm/vs/basic-languages/xml/xml.contribution";
+import "monaco-editor/esm/vs/basic-languages/sql/sql.contribution";
+import "monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution";
+import "monaco-editor/esm/vs/basic-languages/swift/swift.contribution";
+import "monaco-editor/esm/vs/basic-languages/lua/lua.contribution";
+import "monaco-editor/esm/vs/basic-languages/dart/dart.contribution";
+import "monaco-editor/esm/vs/basic-languages/dockerfile/dockerfile.contribution";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
@@ -51,6 +89,9 @@ const URL_RE = /https?:\/\/[^\s"'`<>()\[\]]+/g;
 
 monaco.languages.registerLinkProvider("*", {
   provideLinks(model) {
+    // 链接计算会扫全文，而 monaco 每次 Ctrl+悬停都会调一次：内容没改就直接复用上次的结果
+    const cached = linkCache.get(model);
+    if (cached && cached.version === model.getVersionId()) return { links: cached.links };
     const links: monaco.languages.ILink[] = [];
     const lines = model.getLinesContent();
     for (let i = 0; i < lines.length; i++) {
@@ -64,9 +105,12 @@ monaco.languages.registerLinkProvider("*", {
         });
       }
     }
+    linkCache.set(model, { version: model.getVersionId(), links });
     return { links };
   },
 });
+
+const linkCache = new WeakMap<monaco.editor.ITextModel, { version: number; links: monaco.languages.ILink[] }>();
 
 export interface Doc {
   path: string;
@@ -84,6 +128,9 @@ export class EditorHost {
   // 每个上下文（本机项目标签 / 每个 SSH 连接）各一份打开的文档，切换标签不会串台
   private ctx = "";
   private maps = new Map<string, Map<string, Doc>>();
+  // model -> Doc：current() 每次击键都会调，别再展平所有上下文的数组去找
+  private byModel = new Map<monaco.editor.ITextModel, Doc>();
+  private minimapPref = true;
   private actives = new Map<string, string>(); // 每个上下文最后看的是哪个文件
   private views = new Map<string, monaco.editor.ICodeEditorViewState | null>(); // 光标/滚动位置
 
@@ -139,6 +186,7 @@ export class EditorHost {
     }
     for (const d of m.values()) {
       if (this.ed.getModel() === d.model) this.ed.setModel(null);
+      this.byModel.delete(d.model);
       d.model.dispose();
     }
     this.maps.delete(id);
@@ -197,8 +245,7 @@ export class EditorHost {
 
   current(): Doc | undefined {
     const model = this.ed.getModel();
-    if (!model) return undefined;
-    return this.allDocs().find((d) => d.model === model);
+    return model ? this.byModel.get(model) : undefined;
   }
 
   /** 预览面板等要跟着「当前文档变了 / 内容变了」动一下：两件事都通知 */
@@ -250,7 +297,13 @@ export class EditorHost {
   }
 
   setMinimap(on: boolean) {
-    this.ed.updateOptions({ minimap: { enabled: on } });
+    this.minimapPref = on;
+    this.applyViewOptions();
+  }
+
+  /** 只读的大文件不画 minimap：8MB 的文本画小地图只会拖慢滚动 */
+  private applyViewOptions() {
+    this.ed.updateOptions({ minimap: { enabled: this.minimapPref && !this.current()?.readOnly } });
   }
 
   setWordWrap(on: boolean) {
@@ -282,6 +335,7 @@ export class EditorHost {
       if (!content.includes("\r")) model.setEOL(monaco.editor.EndOfLineSequence.LF);
       d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly, host, port, encoding };
       this.docs.set(path, d);
+      this.byModel.set(model, d);
     }
     this.show(path);
     return d;
@@ -311,6 +365,7 @@ export class EditorHost {
     this.actives.set(this.ctx, path);
     if (this.ed.getModel() !== d.model) this.ed.setModel(d.model);
     this.ed.updateOptions({ readOnly: d.readOnly }); // 超大文件只读
+    this.applyViewOptions();
     this.ed.focus();
   }
 
@@ -323,6 +378,7 @@ export class EditorHost {
     const d = this.find(path);
     if (!d) return;
     if (this.ed.getModel() === d.model) this.ed.setModel(null);
+    this.byModel.delete(d.model);
     d.model.dispose();
     for (const m of this.maps.values()) m.delete(path);
     for (const [id, p] of this.actives) if (p === path) this.actives.delete(id);

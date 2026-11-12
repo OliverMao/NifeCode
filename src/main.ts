@@ -524,10 +524,18 @@ async function checkUpdate(manual: boolean): Promise<"none" | "found" | "fail"> 
 
 // ---------- 未保存内容快照（崩溃/断电后还能捞回来） ----------
 const DIRTY_KEY = "dirty-buffers";
+let dirtySig = "";
 /** shortcut: 只存本机文档，远端要靠连接才能恢复；单文件超过 2MB 不存，升级点：存到磁盘而不是 localStorage */
 function snapshotDirty() {
-  const list = editor
-    .dirtyPaths()
+  const paths = editor.dirtyPaths();
+  // 内容一个字都没变就别再 getValue + stringify 一遍：这函数每 3 秒跑一次，
+  // 大文件全量序列化是同步的，会实打实地卡住打字（versionId 是免费的）
+  const sig = paths
+    .map((p) => p + ":" + editor.docsFor(p)!.model.getAlternativeVersionId())
+    .join("|");
+  if (sig === dirtySig) return;
+  dirtySig = sig;
+  const list = paths
     .map((p) => {
       const d = editor.docsFor(p)!;
       return { path: p, content: d.model.getValue().slice(0, 2_000_000), encoding: d.encoding, ctx: editor.ctxOf(p) ?? activeId };
@@ -1032,9 +1040,9 @@ function tabMenu(p: string): MenuItem[] {
 }
 
 function markTabDirty(path: string, dirty: boolean) {
-  const el = Array.from($("#tabs").children).find((c) => (c as HTMLElement).dataset.path === path) as HTMLElement | undefined;
-  el?.classList.toggle("dirty", dirty);
+  tabEls.get(path)?.classList.toggle("dirty", dirty);
 }
+const tabEls = new Map<string, HTMLElement>(); // 标签行缓存：每次击键都要改脏标记，别每次从 DOM 里线性找
 
 // ---------- 对照（diff）标签页：和文件标签同级，占编辑器那块地方 ----------
 interface DiffTab { id: string; path: string; title: string; oldText: string; newText: string }
@@ -1104,6 +1112,8 @@ function openDiffTab(path: string, oldText: string, newText: string, title: stri
     t = { id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`, path, title, oldText, newText };
     list.push(t);
   }
+  // 同一个文件第二次提 diff：内容换新了，得让 mountDiff 重新挂模型（不然界面上还是上一版）
+  if (diffShownId === t.id) diffShownId = "";
   diffTabs.set(activeId, list);
   diffActive.set(activeId, t.id);
   void mountDiff(t);
@@ -1127,6 +1137,7 @@ function closeDiffTab(id: string) {
 function renderTabs(activePath?: string) {
   const box = $("#tabs");
   box.innerHTML = "";
+  tabEls.clear(); // 标签行重建了，markTabDirty 的缓存跟着换
   if (activePath ?? editor.current()?.path) {
     closeImage();
     closeDoc(); // 切标签就别让文档预览继续盖着
@@ -1157,6 +1168,7 @@ function renderTabs(activePath?: string) {
     };
     el.append(name, x);
     el.onclick = () => { editor.show(p); renderTabs(p); };
+    tabEls.set(p, el);
     el.oncontextmenu = (ev) => {
       ev.preventDefault();
       showMenu(ev.clientX, ev.clientY, tabMenu(p));
@@ -1621,10 +1633,15 @@ function clearSel() {
 
 function paintSel() {
   const activeFile = editor.current()?.path;
-  for (const n of document.querySelectorAll<HTMLElement>(".node")) {
+  for (const n of treeNodes()) {
     n.classList.toggle("active", sel.has(n.dataset.path!));
     n.classList.toggle("current", n.dataset.path === activeFile);
   }
+}
+
+/** 文件树的行（只在本面板里找，别扫整个文档） */
+function treeNodes(): NodeListOf<HTMLElement> {
+  return $("#tree").querySelectorAll<HTMLElement>(".node");
 }
 
 /** 右键/操作要用到的那批路径：点在已选中的行上就整批算，否则只算这一行 */
@@ -1799,6 +1816,7 @@ async function newEntry(dir: string, isDir: boolean) {
   try {
     await invoke("fs_new", { ...connArg(), path, dir: isDir });
     if (isDir) expanded.add(dir);
+    fileCache = null; // 文件集合变了，Ctrl+P 的清单作废
     await refreshTree();
     setMsg(`已创建 ${path}`);
     if (!isDir) void openFile(path);
@@ -1812,6 +1830,7 @@ async function renameEntry(path: string) {
   if (!name || name === baseName(path)) return;
   try {
     await invoke("fs_rename", { ...connArg(), from: path, to: joinPath(parentOf(path), name) });
+    fileCache = null;
     await refreshTree();
     setMsg(`已重命名 ${baseName(path)} → ${name}`);
   } catch (err) {
@@ -1839,6 +1858,7 @@ async function deleteEntry(paths: string[]) {
     }
   }
   closeGone(gone);
+  fileCache = null;
   await refreshTree();
   if (done) setMsg(one ? `已删除 ${paths[0]}` : `已删除 ${done} 项`);
 }
@@ -1866,6 +1886,7 @@ async function pasteInto(dir: string) {
   }
   setMsg(`${clip.cut ? "已移动" : "已复制"} ${done} 项到 ${dir}`);
   if (clip.cut) clip = null;
+  fileCache = null;
   await refreshTree();
 }
 
@@ -1891,7 +1912,7 @@ async function revealInTree(path?: string) {
   }
   if (grew) await refreshTree();
   paintSel(); // refreshTree 里已经画过，没重画也要把 .current 补上
-  const row = [...document.querySelectorAll<HTMLElement>("#tree .node")].find((n) => n.dataset.path === path);
+  const row = [...treeNodes()].find((n) => n.dataset.path === path);
   row?.scrollIntoView({ block: "nearest" });
 }
 
@@ -1907,7 +1928,6 @@ async function refreshTree() {
   $("#tree").replaceChildren(...box.children);
   paintSel(); // 重建行以后把多选高亮补回来
   treeSig = "";
-  fileCache = null;
 }
 
 /** 只 stat 一次，变了就重画：本地 1.5s / 远端 5s 一次 */
@@ -1938,6 +1958,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     return;
   }
   const wrap = document.createElement("div");
+  const subs: [string, HTMLElement][] = []; // 已展开的子目录，画完本级后并行拉取
   for (const e of entries) {
     const row = document.createElement("div");
     row.className = "node";
@@ -1956,7 +1977,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
 
     const select = (ev: MouseEvent) => {
       treeFocus = true;
-      const all = [...document.querySelectorAll<HTMLElement>(".node")];
+      const all = [...treeNodes()];
       if (ev.shiftKey && selAnchor) {
         const a = all.findIndex((r) => r.dataset.path === selAnchor);
         const b = all.indexOf(row);
@@ -2007,7 +2028,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
       if (expanded.has(e.path)) {
         const sub = document.createElement("div");
         row.after(sub);
-        await renderTree(e.path, sub, depth + 1, true);
+        subs.push([e.path, sub]);
       }
     } else {
       row.onclick = (ev) => {
@@ -2018,6 +2039,8 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     }
   }
   container.appendChild(wrap);
+  // 兄弟目录并行读：本地省掉 N 次串行 IPC，远端由常驻 ssh 通道排队、不会更慢
+  await Promise.all(subs.map(([p, box]) => renderTree(p, box, depth + 1, true)));
 }
 
 /** 同一个项目只让一个窗口开：别的窗口已经开着就把它顶到前面，本窗口不重复开 */
@@ -2386,26 +2409,9 @@ async function findRepos(base: string): Promise<string[]> {
   const key = `${host ?? ""}:${port}:${base}`;
   const hit = repoCache.get(key);
   if (hit) return hit;
-  const out: string[] = [];
-  const skip = new Set([".git", "node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"]);
-  // shortcut: 扫盘上限 300 个目录。再深/再大的树靠⟳重扫也没意义，选根目录就够了
-  let budget = 300;
-  const walk = async (dir: string, rel: string, depth: number) => {
-    if (budget-- <= 0) return;
-    let entries: Entry[];
-    try {
-      entries = await invoke<Entry[]>("read_dir", { ...connArg(), path: dir });
-    } catch {
-      return;
-    }
-    if (entries.some((e) => e.name === ".git")) out.push(rel);
-    if (depth >= 3) return; // 只看三层，再深的子仓库用不上还拖慢扫描
-    for (const e of entries) {
-      if (!e.is_dir || skip.has(e.name) || e.name.startsWith(".")) continue;
-      await walk(e.path, rel ? `${rel}/${e.name}` : e.name, depth + 1);
-    }
-  };
-  await walk(base, "", 0);
+  // 以前是前端递归 read_dir：每个目录一次 IPC，远端一次 ssh 往返（300 个目录在 237ms RTT 上要几分钟）。
+  // 现在本地在 Rust 里进程内遍历，远端一条 find 就回来了。
+  const out = await invoke<string[]>("find_repos", { host, port, root: base, depth: 3 }).catch(() => [] as string[]);
   repoCache.set(key, out);
   return out;
 }
@@ -3330,9 +3336,9 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     void pollExternalChanges();
   }, host ? 10000 : 1200); // 远端一次轮询就是一次完整 ssh 往返，别太勤
   setInterval(() => {
-    if (offlineCtx()) return;
+    if (document.hidden || offlineCtx()) return; // 最小化时别一直跑 status
     if ($("#scm").classList.contains("active")) void loadGit();
-  }, 4000);
+  }, 8000);
   // 文件树自动刷新：只 stat 根目录 + 已展开的目录，变了才重画
   setInterval(() => {
     if (document.hidden || offlineCtx()) return;

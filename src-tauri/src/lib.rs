@@ -61,6 +61,7 @@ pub fn run() {
             fsops::fs_copy,
             fsops::fs_reveal,
             fsops::list_files,
+            fsops::find_repos,
             fsops::replace_all,
             fsops::read_binary,
             fsops::fs_open,
