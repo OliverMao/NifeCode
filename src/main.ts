@@ -53,6 +53,7 @@ interface Ctx {
   online?: boolean;    // 只有 SSH 用：false = 从上次会话恢复出来的、还没连
   wantRoot?: string;   // 重连后要回的目录（不是 $HOME 的时候）
   gitRel?: string;     // 源代码管理盯着哪个仓库："" = 工作区根，否则是它下面的相对路径
+  treeOpen?: Set<string>; // 这个项目上次展开了哪些文件夹（切标签回来/重连回来别又折起来）
 }
 
 const CTX_KEY = "contexts";
@@ -221,6 +222,7 @@ function switchContext(id: string) {
   cur.root = root;
   cur.host = host;
   cur.port = port;
+  cur.treeOpen = new Set(expanded); // 记下这个项目展开了哪些，回来时恢复
   if (!contexts.some((c) => c.id === id)) return;
   activeId = id;
   applyActive();
@@ -237,6 +239,7 @@ function switchContext(id: string) {
   setConnLabel();
   renderSsh();
   expanded.clear();
+  for (const p of curCtx().treeOpen ?? []) expanded.add(p);
   clearSel();
   $("#tree").innerHTML = "";
   const c = curCtx();
@@ -2037,6 +2040,7 @@ async function openRoot(path: string) {
   }
   root = path;
   const c = curCtx();
+  if (c.root !== path) c.treeOpen = undefined; // 换了工作区，旧的展开记录作废
   c.root = path;
   if (c.kind === "local" && baseName(path)) {
     c.label = baseName(path);
@@ -2044,6 +2048,7 @@ async function openRoot(path: string) {
   }
   saveCtxs();
   expanded.clear();
+  for (const p of c.treeOpen ?? []) expanded.add(p); // 重连回来 / 换文件夹后恢复展开状态
   clearSel();
   $("#tree").innerHTML = "";
   await refreshTree();
