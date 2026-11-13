@@ -84,6 +84,15 @@ export function languageOf(path: string): string {
   return LANG[ext] ?? "plaintext";
 }
 
+// 日志里重定向出来的终端颜色码（ESC[0;36m 之类）在 Monaco 里只是一串奇怪符号，看着没法读。
+// 打开纯文本时去掉（设置里可以关掉）；去掉之后文件已不是原样，保存会把这些颜色码从磁盘上一并写掉。
+// shortcut: 只认 ANSI 转义序列，CR 覆盖/退格那种进度条残留不管，真遇到再说。
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[ -/]*[0-~]|\x1b/g;
+
+function stripAnsi(text: string): string {
+  return text.includes("\x1b") ? text.replace(ANSI_RE, "") : text;
+}
+
 // 文本里的超链接：Ctrl+点击能点（URL 最后交回宿主，和终端 Ctrl+点击同一个入口）
 const URL_RE = /https?:\/\/[^\s"'`<>()\[\]]+/g;
 
@@ -121,6 +130,7 @@ export interface Doc {
   host: string | null; // 打开它时连的是哪台机器（切上下文也不会写错地方）
   port: number;
   encoding: string; // 打开时的编码（utf-8 / gbk / utf-16le…），保存时按它写回
+  ansi: boolean; // 打开时内容里的 ANSI 转义序列被去掉了（保存会把它们写掉）
 }
 
 export class EditorHost {
@@ -131,6 +141,7 @@ export class EditorHost {
   // model -> Doc：current() 每次击键都会调，别再展平所有上下文的数组去找
   private byModel = new Map<monaco.editor.ITextModel, Doc>();
   private minimapPref = true;
+  private ansiPref = true; // 打开纯文本时去掉 ANSI 颜色码（设置里可关）
   private actives = new Map<string, string>(); // 每个上下文最后看的是哪个文件
   private views = new Map<string, monaco.editor.ICodeEditorViewState | null>(); // 光标/滚动位置
 
@@ -216,6 +227,8 @@ export class EditorHost {
       minimap: { enabled: true },
       scrollBeyondLastLine: false,
       renderWhitespace: "selection",
+      // 中文标点（， ： ； ！ ？ （ ））在 Unicode 的"易混淆字符"表里，默认会被框一个黄框
+      unicodeHighlight: { ambiguousCharacters: false, nonBasicASCII: false },
       tabSize: 4,
     } as monaco.editor.IStandaloneEditorConstructionOptions);
 
@@ -289,7 +302,7 @@ export class EditorHost {
     // 保留滚动位置和光标，否则外部改动重载会像"整个编辑器被重置"
     const isActive = this.ed.getModel() === d.model;
     const view = isActive ? this.ed.saveViewState() : null;
-    d.model.setValue(content);
+    d.model.setValue(d.ansi ? stripAnsi(content) : content);
     if (isActive && view) this.ed.restoreViewState(view);
     d.mtime = mtime;
     d.savedVersion = d.model.getAlternativeVersionId();
@@ -314,6 +327,15 @@ export class EditorHost {
     this.ed.updateOptions({ fontSize: px, lineHeight: Math.round(px * 1.5) });
   }
 
+  /** 高亮易混淆 Unicode 字符（中文标点会被框出来，所以默认关） */
+  setUnicodeHighlight(on: boolean) {
+    this.ed.updateOptions({ unicodeHighlight: { ambiguousCharacters: on, nonBasicASCII: false } });
+  }
+
+  setStripAnsi(on: boolean) {
+    this.ansiPref = on;
+  }
+
   fontSize(): number {
     return this.ed.getOption(monaco.editor.EditorOption.fontSize);
   }
@@ -329,11 +351,19 @@ export class EditorHost {
   ): Doc {
     let d = this.docs.get(path);
     if (!d) {
+      let ansi = false;
+      if (this.ansiPref && languageOf(path) === "plaintext" && content.includes("\x1b")) {
+        const clean = stripAnsi(content);
+        if (clean !== content) {
+          content = clean;
+          ansi = true;
+        }
+      }
       // shortcut: 同一个绝对路径在两个项目里各开一份会有两个同 URI 的模型（罕见），升级点：按 path 复用模型
       const model = monaco.editor.createModel(content, languageOf(path), monaco.Uri.file(path));
       // 默认 LF：文本里没出现过 CR 就不跟随 Windows 的 CRLF，新建文件/新行都是 LF
       if (!content.includes("\r")) model.setEOL(monaco.editor.EndOfLineSequence.LF);
-      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly, host, port, encoding };
+      d = { path, model, mtime, savedVersion: model.getAlternativeVersionId(), readOnly, host, port, encoding, ansi };
       this.docs.set(path, d);
       this.byModel.set(model, d);
     }

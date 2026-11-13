@@ -65,11 +65,14 @@ let activeId = "local:1";
 function saveCtxs() {
   const cur = curCtx();
   if (cur) cur.root = root;
-  const tabs = contexts.map((c) =>
-    c.kind === "local"
-      ? { id: c.id, label: c.label, root: c.root, gitRel: c.gitRel }
-      : { id: c.id, label: c.label, root: c.root, host: c.host, port: c.port, gitRel: c.gitRel }
-  );
+  const tabs = contexts.map((c) => ({
+    id: c.id,
+    kind: c.kind, // 存 kind：拖到新窗口的 SSH 标签 id 不一定以 ssh: 开头
+    label: c.label,
+    root: c.root,
+    gitRel: c.gitRel,
+    ...(c.kind === "ssh" ? { host: c.host, port: c.port } : {}),
+  }));
   ls.set(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
 }
 
@@ -78,13 +81,13 @@ function restoreCtxs() {
     const raw = ls.get(CTX_KEY);
     if (!raw) return;
     const data = JSON.parse(raw) as {
-      locals?: { id: string; label: string; root: string | null; host?: string | null; port?: number; gitRel?: string }[];
+      locals?: { id: string; kind?: "local" | "ssh"; label: string; root: string | null; host?: string | null; port?: number; gitRel?: string }[];
       activeId?: string;
     };
     if (!data.locals?.length) return;
     contexts.length = 0;
     for (const l of data.locals) {
-      const isSsh = l.id.startsWith("ssh:");
+      const isSsh = l.kind ? l.kind === "ssh" : l.id.startsWith("ssh:");
       contexts.push({
         id: l.id,
         kind: isSsh ? "ssh" : "local",
@@ -97,12 +100,30 @@ function restoreCtxs() {
       });
     }
     activeId = contexts.some((c) => c.id === data.activeId) ? data.activeId! : contexts[0].id;
+    // 旧版本存出过重复 id（新标签的编号撞上了恢复回来的）：撞了的换新号，
+    // 不然两个标签会一起高亮，编辑器和终端也分不清该切给谁
+    const seen = new Set<string>();
+    for (const c of contexts) {
+      if (!seen.has(c.id)) {
+        seen.add(c.id);
+        continue;
+      }
+      do ctxSeq += 1;
+      while (contexts.some((x) => x.id === `local:${ctxSeq}`));
+      c.id = `local:${ctxSeq}`;
+      seen.add(c.id);
+    }
   } catch { /* 存坏了就用默认 */ }
 }
 
 function newLocalContext(): Ctx {
-  ctxSeq += 1;
-  const c: Ctx = { id: `local:${ctxSeq}`, kind: "local", label: `本机 ${ctxSeq}`, host: null, port: 22, root: null };
+  // 编号要从已有的 id 里挑空的：恢复回来的标签可能已经占用了 local:2、local:3
+  let id: string;
+  do {
+    ctxSeq += 1;
+    id = `local:${ctxSeq}`;
+  } while (contexts.some((c) => c.id === id));
+  const c: Ctx = { id, kind: "local", label: `本机 ${ctxSeq}`, host: null, port: 22, root: null };
   contexts.push(c);
   return c;
 }
@@ -214,6 +235,8 @@ function applyActive() {
   host = c.host;
   port = c.port;
   root = c.root;
+  // 搜索结果里存的是上一个项目的绝对路径，切项目后留着就会被点开到错的项目里（甚至拿本地路径去 SSH 读）
+  $("#search-list").innerHTML = "";
 }
 
 function switchContext(id: string) {
@@ -253,6 +276,8 @@ function switchContext(id: string) {
   if (root) void refreshTree();
   if ($("#scm").classList.contains("active")) void loadGit();
   else renderGit(null);
+  // 切标签就把当前标签、以及上一个项目展开的文件夹落盘：异常退出/关窗口也能回到原样
+  saveCtxs();
   setMsg(root ?? "未打开文件夹");
 }
 
@@ -305,6 +330,7 @@ async function closeContext(id: string, keepSession = false) {
       renderTabs();
       renderStatusInfo();
       expanded.clear();
+      for (const p of next.treeOpen ?? []) expanded.add(p); // 这个项目上次展开了哪些，回来还是展开的
   clearSel();
       $("#tree").innerHTML = "";
       if (root) void refreshTree();
@@ -330,12 +356,16 @@ async function closeContext(id: string, keepSession = false) {
   }
   contexts.splice(contexts.indexOf(c), 1);
   if (activeId === id) {
-    activeId = "local";
+    // 之前写的是 "local"，但那不是一个真实标签的 id：切过去没有标签高亮，host/port 也还留在那台机器上
+    let next = contexts.find((x) => x.kind === "local") ?? contexts[0];
+    if (!next) next = newLocalContext(); // 关掉最后一个标签：留一个空的本机项目，否则下面 next.id 就是 undefined
+    activeId = next.id;
     applyActive();
     editor.setCtx(activeId);
     renderTabs();
     renderStatusInfo();
     expanded.clear();
+    for (const p of next.treeOpen ?? []) expanded.add(p);
   clearSel();
     $("#tree").innerHTML = "";
     if (root) void refreshTree();
@@ -415,6 +445,15 @@ function setConnLabel(pending?: string) {
 
 // ---------- 模态框 ----------
 type Btn = { label: string; value: string; primary?: boolean };
+// 弹框的键盘：回车 = 主按钮，Esc = 取消。挂在 document 的捕获阶段是因为
+// 没有输入框的弹框（删除确认、连接失败…）焦点还留在编辑器/文件树上，
+// 按键根本不会冒泡到 #modal 里——这就是“回车没反应”的原因。
+let askKeys: ((ev: KeyboardEvent) => void) | null = null;
+function dropAskKeys() {
+  if (!askKeys) return;
+  document.removeEventListener("keydown", askKeys, true);
+  askKeys = null;
+}
 function ask(title: string, bodyHTML: string, buttons: Btn[]): Promise<string> {
   return new Promise((resolve) => {
     const m = $<HTMLDivElement>("#modal");
@@ -423,13 +462,40 @@ function ask(title: string, bodyHTML: string, buttons: Btn[]): Promise<string> {
     body.innerHTML = bodyHTML;
     const acts = m.querySelector(".actions") as HTMLDivElement;
     acts.innerHTML = "";
+    const done = (v: string) => {
+      dropAskKeys(); // 弹框关了就把键盘交回去
+      m.classList.add("hidden");
+      resolve(v);
+    };
     for (const b of buttons) {
       const el = document.createElement("button");
       el.textContent = b.label;
       if (!b.primary) el.className = "secondary";
-      el.onclick = () => { m.classList.add("hidden"); resolve(b.value); };
+      el.onclick = () => done(b.value);
       acts.appendChild(el);
     }
+    // 回车 = 点主按钮（没标 primary 就点最后一个），Esc = 取消。
+    // 以前 Esc 只把框藏起来、不 resolve，等着这一下的调用方（关标签、换编码…）会永远等下去。
+    const primary = acts.querySelector<HTMLButtonElement>("button:not(.secondary)") ?? (acts.lastElementChild as HTMLButtonElement | null);
+    const cancel = buttons.find((b) => !b.primary)?.value ?? buttons[buttons.length - 1].value;
+    dropAskKeys(); // 上一个弹框如果还挂着，先摘掉
+    askKeys = (ev) => {
+      if (m.classList.contains("hidden")) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        done(cancel);
+        return;
+      }
+      if (ev.key !== "Enter" || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      const t = ev.target as HTMLElement | null;
+      if (t && t.tagName === "TEXTAREA") return; // 多行输入里回车是换行
+      if (t && t.tagName === "BUTTON" && t.closest(".body")) return; // 框里的自绘按钮（清理缓存、检查更新…）按自己的来
+      ev.preventDefault();
+      ev.stopPropagation();
+      primary?.click();
+    };
+    document.addEventListener("keydown", askKeys, true);
     m.classList.remove("hidden");
     const first = body.querySelector("input") as HTMLInputElement | null;
     first?.focus();
@@ -590,18 +656,22 @@ async function restoreDirty() {
 interface Settings {
   minimap: boolean;
   wordWrap: boolean;
+  unicodeHighlight: boolean;
+  stripAnsi: boolean;
   eol: "lf" | "crlf";
   shell: string;
   confirmClose: boolean;
   snapshot: boolean;
 }
-const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, eol: "lf", shell: "", confirmClose: true, snapshot: true };
+const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, unicodeHighlight: false, stripAnsi: true, eol: "lf", shell: "", confirmClose: true, snapshot: true };
 
 function loadSettings(): Settings {
   const b = (k: string, d: boolean) => (ls.get(k) === null ? d : ls.get(k) === "1");
   return {
     minimap: b("minimap", SET_DEFAULTS.minimap),
     wordWrap: b("editor-wrap", SET_DEFAULTS.wordWrap),
+    unicodeHighlight: b("unicode-highlight", SET_DEFAULTS.unicodeHighlight),
+    stripAnsi: b("strip-ansi", SET_DEFAULTS.stripAnsi),
     eol: (ls.get("eol") as "lf" | "crlf") || SET_DEFAULTS.eol,
     shell: ls.get("term-shell") ?? SET_DEFAULTS.shell,
     confirmClose: b("confirm-close", SET_DEFAULTS.confirmClose),
@@ -613,6 +683,8 @@ const settings = loadSettings();
 function applyEditorSettings() {
   editor.setMinimap(settings.minimap);
   editor.setWordWrap(settings.wordWrap);
+  editor.setUnicodeHighlight(settings.unicodeHighlight);
+  editor.setStripAnsi(settings.stripAnsi);
 }
 
 async function showSettings() {
@@ -638,6 +710,20 @@ async function showSettings() {
   rows.push(sec("编辑器"));
   rows.push(row("代码缩略图", "显示在编辑器右侧", check("set-minimap", settings.minimap)));
   rows.push(row("自动换行", "按窗口宽度折行", check("set-wrap", settings.wordWrap)));
+  rows.push(
+    row(
+      "易混淆字符高亮",
+      "Monaco 默认会把中文标点（，：；！？）框一个黄框，一般不用开",
+      check("set-unicode", settings.unicodeHighlight)
+    )
+  );
+  rows.push(
+    row(
+      "去掉日志颜色码",
+      "打开纯文本时忽略 ANSI 转义序列（ESC[0;36m 这类），看着就是干净的字；保存后原文件里也没有了",
+      check("set-ansi", settings.stripAnsi)
+    )
+  );
   rows.push(
     row(
       "换行符",
@@ -711,6 +797,16 @@ async function showSettings() {
     settings.wordWrap = (e.target as HTMLInputElement).checked;
     save("editor-wrap", settings.wordWrap ? "1" : "0");
     editor.setWordWrap(settings.wordWrap);
+  });
+  on<HTMLInputElement>("set-unicode")?.addEventListener("change", (e) => {
+    settings.unicodeHighlight = (e.target as HTMLInputElement).checked;
+    save("unicode-highlight", settings.unicodeHighlight ? "1" : "0");
+    editor.setUnicodeHighlight(settings.unicodeHighlight);
+  });
+  on<HTMLInputElement>("set-ansi")?.addEventListener("change", (e) => {
+    settings.stripAnsi = (e.target as HTMLInputElement).checked;
+    save("strip-ansi", settings.stripAnsi ? "1" : "0");
+    editor.setStripAnsi(settings.stripAnsi); // 下次打开才生效，已开着的文件不动它
   });
   on<HTMLSelectElement>("set-eol")?.addEventListener("change", (e) => {
     settings.eol = (e.target as HTMLSelectElement).value as "lf" | "crlf";
@@ -809,21 +905,22 @@ editor.onDocChange(() => syncMdPreview());
 // ---------- 标签页 ----------
 
 // ---------- 文件夹选择器（本机 / 远端共用，不走系统对话框：有些机器弹资源管理器很卡）----------
-async function pickFolder(start?: string): Promise<string | null> {
+async function pickFolder(start?: string, conn = connArg()): Promise<string | null> {
   // 本机没打开工作区时先落到用户目录：Windows 的 "/" 是当前盘根，拿去当工作区很奇怪
-  const from = start || (host ? "/" : (await invoke<string | null>("home_dir").catch(() => null)) ?? "/");
+  const from = start || (conn.host ? "/" : (await invoke<string | null>("home_dir").catch(() => null)) ?? "/");
   const m = $("#modal");
-  m.querySelector(".title")!.textContent = host ? "打开远端文件夹" : "打开文件夹";
+  m.querySelector(".title")!.textContent = conn.host ? "打开远端文件夹" : "打开文件夹";
   const body = m.querySelector(".body") as HTMLDivElement;
   const acts = m.querySelector(".actions") as HTMLDivElement;
   body.style.whiteSpace = "normal";
   body.innerHTML = `
     <div class="pk-path">
-      <input id="pk-input" spellcheck="false" placeholder="${host ? "/home/user/project" : "D:/projects/xxx"}" />
+      <input id="pk-input" spellcheck="false" placeholder="${conn.host ? "/home/user/project" : "D:/projects/xxx"}" />
     </div>
     <div id="pk-list" class="pk-list"></div>`;
   acts.innerHTML = "";
   m.classList.remove("hidden");
+  dropAskKeys(); // 这个面板自己管回车（回车 = 进目录），别让弹框那套把它吃掉
 
   const input = body.querySelector("#pk-input") as HTMLInputElement;
   const list = body.querySelector("#pk-list") as HTMLDivElement;
@@ -850,7 +947,7 @@ async function pickFolder(start?: string): Promise<string | null> {
     list.innerHTML = `<div class="pk-empty">读取中…</div>`;
     let entries: Entry[];
     try {
-      entries = await invoke<Entry[]>("read_dir", { ...connArg(), path });
+      entries = await invoke<Entry[]>("read_dir", { ...conn, path });
     } catch (e) {
       list.innerHTML = `<div class="pk-empty">打不开：${String(e).slice(0, 120)}</div>`;
       return;
@@ -1088,6 +1185,7 @@ async function mountDiff(t: DiffTab) {
       useInlineViewWhenSpaceIsLimited: false,
       wordWrap: "on",
       readOnly: true, // 对照只是看，改文本请关掉它回文件标签
+      unicodeHighlight: { ambiguousCharacters: settings.unicodeHighlight, nonBasicASCII: false },
     });
   }
   diffModel?.original.dispose();
@@ -1138,10 +1236,10 @@ function renderTabs(activePath?: string) {
   const box = $("#tabs");
   box.innerHTML = "";
   tabEls.clear(); // 标签行重建了，markTabDirty 的缓存跟着换
-  if (activePath ?? editor.current()?.path) {
-    closeImage();
-    closeDoc(); // 切标签就别让文档预览继续盖着
-  }
+  // 预览（图片 / Word / PDF）是盖在编辑区上的一层，换文件、换项目都得收掉：
+  // 新项目一个文件都没开时 editor.current() 是空的，只靠下面那个判断会把上一个项目的图片留在屏上
+  closeImage();
+  closeDoc();
   // 点了文件标签（或者打开/保存后重画）就把 diff 收起来，别两份"当前"打架
   if (activePath) diffActive.set(activeId, null);
   const dtabs = diffTabs.get(activeId) ?? [];
@@ -1284,6 +1382,7 @@ async function openFile(path: string, line?: number) {
     }
     const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge || !!res.binary);
     if (res.binary) setMsg(`${baseName(path)} 是二进制文件，已只读打开`);
+    else if (d.ansi) setMsg(`${baseName(path)} 里的 ANSI 颜色码已去掉（保存会连着它们一起写掉）`);
     else if (res.huge) setMsg(`${baseName(path)} 超过 8MB，已只读打开`);
     if (line) editor.revealLine(line);
     renderTabs(path);
@@ -2057,6 +2156,15 @@ async function claimRoot(next?: string): Promise<boolean> {
 async function openRoot(path: string) {
   // 统一成正斜杠：右键菜单/命令行/手输都可能给反斜杠，混着会导致树里路径和标签路径对不上
   path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  // 同一个文件夹已经开在本窗口的另一个标签里：切过去，别再开一份
+  // （两份缓冲各改各的，保存时互相覆盖，看起来就像“改了又变回去”）
+  const self = curCtx();
+  const dup = contexts.find((x) => x.id !== self.id && x.host === self.host && x.root === path);
+  if (dup) {
+    switchContext(dup.id);
+    setMsg(`这个文件夹已经开在「${dup.label}」标签里`);
+    return;
+  }
   if (!(await claimRoot(path))) {
     setMsg("这个项目已经在另一个窗口打开了，已经切过去");
     return;
@@ -2865,21 +2973,26 @@ async function boot() {
 
   $<HTMLButtonElement>("#ctx-new").onclick = async () => {
     saveCtxs();
-    const prev = activeId;
-    const from = root; // 新标签从当前看的工作区位置开始浏览（更像人找文件夹的习惯）
+    // 「+」永远是本机项目：当前看的是 SSH 时，它的 /root 和远端目录都不该混进来
+    const local = { host: null, port: 22 };
+    const dir = await pickFolder(curCtx().kind === "local" ? root ?? undefined : undefined, local);
+    if (!dir) return; // 没选就不建标签
+    const dup = contexts.find((x) => x.kind === "local" && x.root === dir);
+    if (dup) {
+      switchContext(dup.id);
+      setMsg(`这个文件夹已经开在「${dup.label}」标签里`);
+      return;
+    }
     const c = newLocalContext();
     activeId = c.id;
     applyActive();
+    // 编辑区和终端要当场切到新项目（空），否则新标签高亮了、里面还是上一个项目的文件
+    editor.setCtx(c.id);
+    renderTabs();
+    renderStatusInfo();
+    bindTermSet();
+    setConnLabel();
     renderCtxBar();
-    const dir = await pickFolder(from ?? undefined);
-    if (!dir) {
-      // 取消了就别留空标签
-      contexts.splice(contexts.indexOf(c), 1);
-      activeId = prev;
-      applyActive();
-      renderCtxBar();
-      return;
-    }
     c.root = dir;
     c.label = baseName(dir) || c.label;
     await openRoot(dir);
@@ -3316,7 +3429,13 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (saved.length) setMsg(`Agent 触发的保存：${saved.length} 个文件`);
     await invoke("bridge_save_result", { res: { ok: errors.length === 0, saved, errors } }).catch(() => {});
   });
-  await listen<{ path: string }>("bridge:workspace", (e) => { host = null; setConnLabel(); void openRoot(e.payload.path); });
+  await listen<{ path: string }>("bridge:workspace", (e) => {
+    // 切工作区是本机动作：当前看的是 SSH 标签时先回本机，否则本机路径会被写进那个 SSH 项目
+    const local = contexts.find((c) => c.kind === "local") ?? contexts[0];
+    if (local.id !== activeId) switchContext(local.id);
+    setConnLabel();
+    void openRoot(e.payload.path);
+  });
   await listen<{ path: string; oldContent?: string; newContent: string }>("bridge:diff", async (e) => {
     setMsg(`Agent 提案：${baseName(e.payload.path)}`);
     const cur = editor.docsFor(e.payload.path);
@@ -3385,6 +3504,7 @@ async function openDiff(path: string, oldText: string, newText: string, opts: { 
     useInlineViewWhenSpaceIsLimited: true,
     renderSideBySideInlineBreakpoint: 720,
     wordWrap: "on", // 窄列里长行不折行就被切掉，看不清改了什么
+    unicodeHighlight: { ambiguousCharacters: settings.unicodeHighlight, nonBasicASCII: false },
   });
   const m1 = monaco.editor.createModel(oldText, undefined, monaco.Uri.parse(`inmemory://original/${path}`));
   const m2 = monaco.editor.createModel(newText, undefined, monaco.Uri.parse(`inmemory://proposed/${path}`));
@@ -3449,6 +3569,7 @@ async function quickOpen() {
   body.innerHTML = `<div class="pk-path"><input id="qo-input" spellcheck="false" placeholder="输入文件名或路径片段…" /></div><div id="qo-list" class="pk-list"></div>`;
   (m.querySelector(".actions") as HTMLDivElement).innerHTML = "";
   m.classList.remove("hidden");
+  dropAskKeys(); // 面板自己管回车（回车 = 打开选中的文件），别接到上一个弹框的按钮
   const input = $<HTMLInputElement>("#qo-input");
   const box = $<HTMLDivElement>("#qo-list");
   input.focus();
@@ -3505,7 +3626,8 @@ async function quickOpen() {
 }
 
 async function showCommandPalette() {
-  const r = await ask(
+  // 不能 await：命令面板要靠下面挂的 input.onkeydown 吃回车，await 到这里弹框已经关了
+  void ask(
     "命令面板",
     `<input id="pal-input" placeholder="输入命令…" />
      <div id="pal-list" style="margin-top:8px;font-size:12px;color:#9d9d9d;line-height:1.8">
@@ -3513,7 +3635,7 @@ async function showCommandPalette() {
      </div>`,
     [{ label: "取消", value: "cancel" }]
   );
-  void r;
+  dropAskKeys(); // 回车由下面自己处理（回车 = 跑命令，不是关弹框）
   const input = $("#modal #pal-input") as HTMLInputElement | null;
   input?.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
