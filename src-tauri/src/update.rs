@@ -45,7 +45,9 @@ fn curl(url: &str, out: Option<&PathBuf>) -> Result<Vec<u8>, String> {
     for attempt in 0..3 {
         let mut cmd = Command::new("curl");
         cmd.args([
-            "-sSL",
+            // -f：4xx/5xx 直接当失败（不然会把 GitHub 的错误页当成 JSON 去解析，
+            // 最后只能报一句含糊的「不是 Release JSON」）
+            "-sSLf",
             "--max-time",
             "120",
             "--retry",
@@ -102,8 +104,20 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, S
     let raw = tauri::async_runtime::spawn_blocking(move || curl(&api_url(), None))
         .await
         .map_err(|e| e.to_string())??;
-    let rel: Release =
-        serde_json::from_slice(&raw).map_err(|_| "更新源返回的不是 Release JSON（私有仓库会 404）".to_string())?;
+    // 解析失败要能看出到底为什么：限流 / 仓库还没发过 release / 代理拦截页，各自说清楚
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let rel: Release = serde_json::from_str(&text).map_err(|e| {
+        let hint = if text.contains("rate limit") {
+            "GitHub API 限流了（匿名每小时 60 次），过几分钟再试"
+        } else if text.contains("Not Found") {
+            "这个仓库还没有任何 Release"
+        } else if text.trim_start().starts_with('<') {
+            "更新源返回的是网页，不是 GitHub API（代理 / 拦截页？）"
+        } else {
+            "更新源返回的不是 Release JSON"
+        };
+        format!("{hint}（{e}）；响应前 120 字：{}", text.chars().take(120).collect::<String>())
+    })?;
     if !newer(&rel.tag_name, &current) {
         return Ok(None);
     }
