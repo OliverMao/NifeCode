@@ -521,7 +521,7 @@ async function showAbout() {
       <div class="logo">${ABOUT_LOGO}</div>
       <div class="name">NifeCode</div>
       <div class="ver">版本 ${v || "开发版"}</div>
-      <div class="desc">轻量编辑器 · Monaco + xterm + Tauri<br/>SSH 远端开发 · 多标签工作区 · Agent Bridge</div>
+      <div class="slogan">VS Code 的手感，一半的内存</div>
       <div class="hp"></div>
       <a id="about-repo" title="点击复制仓库地址">github.com/OliverMao/NifeCode</a>
       <div class="lic">GPL-3.0 许可 · © 2026 OliverMao</div>

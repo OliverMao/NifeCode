@@ -527,7 +527,8 @@ body {
 .about .logo { display: flex; justify-content: center; margin: 4px 0 12px; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .55)); }
 .about .name { font-size: calc(var(--ui) + 7px); font-weight: 600; color: #f0ecf8; letter-spacing: .3px; }
 .about .ver { margin-top: 3px; color: #9d9d9d; font-size: calc(var(--ui) - 1px); }
-.about .desc { margin-top: 14px; color: #8a8a8a; font-size: calc(var(--ui) - 1.5px); line-height: 1.7; }
+/* 一句标语：比版本号大一点、比名字暗一点，别把 About 写成功能列表 */
+.about .slogan { margin-top: 14px; color: #bdb6cc; font-size: calc(var(--ui) + 1px); letter-spacing: .4px; }
 .about .hp { border-top: 1px solid #3c3c3c; margin: 16px 12px 10px; }
 .about a { color: var(--accent-fg); font-size: calc(var(--ui) - 1.5px); cursor: pointer; text-decoration: none; }
 .about a:hover { text-decoration: underline; }
