@@ -344,6 +344,17 @@ body {
   background-image: linear-gradient(45deg, #2a2a2a 25%, transparent 25%), linear-gradient(-45deg, #2a2a2a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #2a2a2a 75%), linear-gradient(-45deg, transparent 75%, #2a2a2a 75%);
   background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0; }
 #tabs { display: flex; background: var(--bg-tab); overflow-x: auto; flex: 0 0 auto; height: 35px; position: relative; }
+
+/* 文件标签右边常驻一小块：只有当前文件是 Markdown 时才出现，点一下开关右侧渲染预览 */
+#tabbar { display: flex; flex: 0 0 auto; height: 35px; background: var(--bg-tab); }
+#tabbar #tabs { flex: 1; min-width: 0; }
+#tab-md {
+  display: none; align-items: center; padding: 0 12px; border: 0; border-left: 1px solid var(--border);
+  background: transparent; color: var(--fg-dim); cursor: pointer; font-size: calc(var(--ui) - 1px); white-space: nowrap;
+}
+#tab-md.show { display: flex; }
+#tab-md:hover { color: #fff; }
+#tab-md.on { color: #fff; background: var(--bg-tab-active); border-top: 1px solid var(--accent); }
 #tabs::-webkit-scrollbar { height: 0; }
 .tab {
   display: flex; align-items: center; gap: 6px; padding: 0 12px; cursor: pointer;
@@ -362,7 +373,7 @@ body {
   display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr;
   grid-template-areas: "tabs tabs" "editor preview";
 }
-#main.md-split #tabs { grid-area: tabs; }
+#main.md-split #tabbar { grid-area: tabs; }
 #main.md-split #editor, #main.md-split #diff-host { grid-area: editor; min-width: 0; }
 #md-preview {
   grid-area: preview; min-width: 0; overflow: auto; border-left: 1px solid var(--border);

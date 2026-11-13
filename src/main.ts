@@ -400,6 +400,10 @@ function renderStatusInfo() {
   const md = $<HTMLSpanElement>("#st-md");
   md.style.display = isMarkdown(d?.path) ? "" : "none";
   md.classList.toggle("on", !!mdPreview);
+  // 标签栏右边那个「预览」按钮：只对 .md 出现（状态栏那个位置太不起眼）
+  const mdTab = $<HTMLButtonElement>("#tab-md");
+  mdTab.classList.toggle("show", isMarkdown(d?.path));
+  mdTab.classList.toggle("on", !!mdPreview);
 }
 
 /** 换编码重新读盘（有未保存改动先问） */
@@ -3132,6 +3136,12 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
     b.onclick = () => {
       const act = b.dataset.act;
+      // 再点一次当前活动栏按钮 = 收起侧栏（资源管理器收文件树、搜索收结果、SSH 收列表），和 VS Code 一样
+      if (b.classList.contains("active") && !$("#sidebar").classList.contains("collapsed")) {
+        $("#sidebar").classList.add("collapsed");
+        b.classList.remove("active");
+        return;
+      }
       document.querySelectorAll("#activity button").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
       $("#sidebar").classList.remove("collapsed");
@@ -3230,6 +3240,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
   $<HTMLSpanElement>("#st-md").onclick = () => toggleMdPreview();
+  $<HTMLButtonElement>("#tab-md").onclick = () => toggleMdPreview();
   // 自定义标题栏的三个按钮（SVG 自绘，跟其它图标同一套笔画）
   const WIN_ICON = {
     min: '<svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg>',
