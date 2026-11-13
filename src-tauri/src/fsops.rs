@@ -203,7 +203,7 @@ pub fn ssh_forget_host(target: String, port: u16) -> Result<(), String> {
 }
 
 // ---------- 密码：存 Windows 凭据管理器（DPAPI 保护），不落 localStorage ----------
-const KEYRING_SERVICE: &str = "dev.nife.code";
+pub(crate) const KEYRING_SERVICE: &str = "dev.nife.code";
 
 fn cred_user(target: &str, port: u16) -> String {
     format!("{target}#{port}")

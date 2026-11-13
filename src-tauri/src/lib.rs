@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
+mod ai;
 mod bridge;
 mod cache;
 mod fsops;
@@ -41,6 +42,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            ai::ai_key_saved,
+            ai::ai_key_set,
+            ai::ai_post,
             fsops::read_file,
             fsops::write_file,
             fsops::read_dir,
