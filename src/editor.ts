@@ -230,8 +230,6 @@ export class EditorHost {
       // 中文标点（， ： ； ！ ？ （ ））在 Unicode 的"易混淆字符"表里，默认会被框一个黄框
       unicodeHighlight: { ambiguousCharacters: false, nonBasicASCII: false },
       tabSize: 4,
-      // AI 补全的灰字（provider 在 ai.ts 里注册，开关不在 Monaco 这边）
-      inlineSuggest: { enabled: true, showToolbar: "never" },
     } as monaco.editor.IStandaloneEditorConstructionOptions);
 
     this.ed.onDidChangeModelContent(() => {
@@ -256,13 +254,6 @@ export class EditorHost {
       };
     });
     this.ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, onSave);
-    // Monaco 自带的「Tab 接受灰字」只在当前行缩进 < tabSize 时生效，4 空格缩进的行就永远轮不到，
-    // 于是 Tab 只会缩进。这里换一条只看「有没有灰字」的规则，用更大的权重压过内置那条。
-    monaco.editor.addKeybindingRule({
-      keybinding: monaco.KeyCode.Tab,
-      command: "editor.action.inlineSuggest.commit",
-      when: "editorTextFocus && inlineSuggestionVisible && !editorTabMovesFocus && !suggestWidgetVisible",
-    });
   }
 
   current(): Doc | undefined {

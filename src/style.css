@@ -129,10 +129,6 @@ body {
   content: ""; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px;
   border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
-.set-row input[type="text"], .set-row input[type="password"] {
-  background: #3c3c3c; color: #eee; border: 1px solid #555; border-radius: 2px;
-  padding: 3px 6px; font: inherit; width: 240px;
-}
 .set-row select, .set-row input[type="number"] {
   background: #3c3c3c; color: #eee; border: 1px solid #555; border-radius: 2px;
   padding: 3px 6px; font: inherit; min-width: 110px;
@@ -146,12 +142,6 @@ body {
 }
 #modal .set-row button.mini:hover { background: #4a4d51; border-color: var(--accent); }
 #modal .set-row button.mini:disabled { opacity: .6; cursor: default; }
-/* AI 补全的灰字（Monaco 用这个类名画 inline suggestion） */
-.monaco-editor .ghost-text,
-.monaco-editor .ghost-text-decoration {
-  color: var(--fg-dim) !important;
-  font-style: italic;
-}
 .set-foot { margin-top: 14px; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); text-align: center; }
 
 #sidebar { background: var(--bg-side); display: flex; flex-direction: column; overflow: hidden; }

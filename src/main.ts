@@ -11,7 +11,6 @@ import { listen } from "@tauri-apps/api/event";
 import { EditorHost } from "./editor";
 import { renderMarkdown } from "monaco-editor/esm/vs/base/browser/markdownRenderer.js";
 import { TerminalHost } from "./terminal";
-import { registerAi } from "./ai";
 
 interface Entry { name: string; path: string; is_dir: boolean }
 interface ReadFile { content: string; mtime: number; encoding: string; huge?: boolean; binary?: boolean }
@@ -669,8 +668,6 @@ async function restoreDirty() {
 
 // ---------- 编辑器 ----------
 // ---------- 设置 ----------
-/** 塞进 input value="" 里用：设置项可能带引号（比如后缀列表被人手改了） */
-const attr = (v: string) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 interface Settings {
   minimap: boolean;
   wordWrap: boolean;
@@ -680,19 +677,8 @@ interface Settings {
   shell: string;
   confirmClose: boolean;
   snapshot: boolean;
-  aiOn: boolean;
-  aiExts: string;
-  aiBase: string;
-  aiModel: string;
 }
-const SET_DEFAULTS: Settings = {
-  minimap: true, wordWrap: false, unicodeHighlight: false, stripAnsi: true, eol: "lf", shell: "",
-  confirmClose: true, snapshot: true,
-  aiOn: false, // 开着就等于把正在写的代码发给那个接口，所以默认关
-  aiExts: ".ts,.tsx,.js,.jsx,.mjs,.py,.rs,.go,.java,.c,.h,.cpp,.cs,.php,.rb,.vue,.svelte,.css,.html,.sh,.sql",
-  aiBase: "https://api-nife.yoobit.cn/v41/v1",
-  aiModel: "Nife-v4.1",
-};
+const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, unicodeHighlight: false, stripAnsi: true, eol: "lf", shell: "", confirmClose: true, snapshot: true };
 
 function loadSettings(): Settings {
   const b = (k: string, d: boolean) => (ls.get(k) === null ? d : ls.get(k) === "1");
@@ -705,10 +691,6 @@ function loadSettings(): Settings {
     shell: ls.get("term-shell") ?? SET_DEFAULTS.shell,
     confirmClose: b("confirm-close", SET_DEFAULTS.confirmClose),
     snapshot: b("snapshot", SET_DEFAULTS.snapshot),
-    aiOn: b("ai-on", SET_DEFAULTS.aiOn),
-    aiExts: ls.get("ai-exts") ?? SET_DEFAULTS.aiExts,
-    aiBase: ls.get("ai-base") ?? SET_DEFAULTS.aiBase,
-    aiModel: ls.get("ai-model") ?? SET_DEFAULTS.aiModel,
   };
 }
 const settings = loadSettings();
@@ -725,7 +707,6 @@ async function showSettings() {
   // 右键菜单的开关以注册表为准（用户可能自己手动删了）
   const menuOn = await invoke<boolean>("shell_menu_state").catch(() => false);
   const installed = await invoke<boolean>("is_installed").catch(() => false);
-  const aiKey = await invoke<boolean>("ai_key_saved").catch(() => false);
   const rows: string[] = [];
   const row = (k: string, hint: string, v: string) =>
     `<div class="set-row"><div class="k"><b>${k}</b><span>${hint}</span></div><div class="v">${v}</div></div>`;
@@ -766,39 +747,6 @@ async function showSettings() {
          <option value="lf" ${settings.eol === "lf" ? "selected" : ""}>LF</option>
          <option value="crlf" ${settings.eol === "crlf" ? "selected" : ""}>CRLF</option>
        </select>`
-    )
-  );
-
-  rows.push(sec("AI 补全"));
-  rows.push(
-    row(
-      "行内自动补全",
-      "停顿后在光标处给灰字建议，Tab 接受、Esc 收起。开启即表示同意把正在写的那段代码发给下面配的接口",
-      check("set-ai", settings.aiOn)
-    )
-  );
-  rows.push(
-    row(
-      "参与补全的后缀",
-      "逗号分隔，不在列表里的文件一次请求都不发",
-      `<input id="set-ai-exts" type="text" spellcheck="false" value="${attr(settings.aiExts)}" />`
-    )
-  );
-  rows.push(
-    row(
-      "接口地址",
-      "OpenAI 兼容，后缀 /chat/completions 由程序拼",
-      `<input id="set-ai-base" type="text" spellcheck="false" value="${attr(settings.aiBase)}" />`
-    )
-  );
-  rows.push(
-    row("模型", "用来补全的模型名", `<input id="set-ai-model" type="text" spellcheck="false" value="${attr(settings.aiModel)}" />`)
-  );
-  rows.push(
-    row(
-      "API Key",
-      "存进 Windows 凭据管理器，不写进配置；回车保存，清空并回车等于删除",
-      `<input id="set-ai-key" type="password" spellcheck="false" placeholder="${aiKey ? "已保存（重新输入可替换）" : "未设置"}" />`
     )
   );
 
@@ -892,25 +840,6 @@ async function showSettings() {
     settings.snapshot = (e.target as HTMLInputElement).checked;
     save("snapshot", settings.snapshot ? "1" : "0");
   });
-
-  on<HTMLInputElement>("set-ai")?.addEventListener("change", (e) => {
-    settings.aiOn = (e.target as HTMLInputElement).checked;
-    save("ai-on", settings.aiOn ? "1" : "0");
-  });
-  const aiText = (id: string, set: (v: string) => void, key: string) =>
-    on<HTMLInputElement>(id)?.addEventListener("change", (e) => {
-      set((e.target as HTMLInputElement).value.trim());
-      save(key, (e.target as HTMLInputElement).value.trim());
-    });
-  aiText("set-ai-exts", (v) => (settings.aiExts = v), "ai-exts");
-  aiText("set-ai-base", (v) => (settings.aiBase = v), "ai-base");
-  aiText("set-ai-model", (v) => (settings.aiModel = v), "ai-model");
-  on<HTMLInputElement>("set-ai-key")?.addEventListener("change", async (e) => {
-    const el = e.target as HTMLInputElement;
-    const r = await invoke("ai_key_set", { key: el.value.trim() }).catch((err) => String(err));
-    el.value = "";
-    setMsg(r === undefined ? (settings.aiOn ? "API Key 已保存" : "API Key 已保存（补全还关着）") : `保存 Key 失败：${r}`);
-  });
   on<HTMLInputElement>("set-shell-menu")?.addEventListener("change", async (e) => {
     const cb = e.target as HTMLInputElement;
     cb.disabled = true;
@@ -987,8 +916,6 @@ const editor = new EditorHost(
 );
 editor.setCtx(activeId);
 editor.onDocChange(() => syncMdPreview());
-// AI 行内补全：策略全在 ai.ts，这里只把设置喂给它
-registerAi(() => ({ on: settings.aiOn, exts: settings.aiExts, base: settings.aiBase, model: settings.aiModel }), setMsg);
 
 // ---------- 标签页 ----------
 
