@@ -553,7 +553,18 @@ interface UpdateInfo {
 }
 
 /** 查更新；发现新版就在这里问用户要不要换。返回值给「关于」里的按钮用 */
+let updateBusy = false; // 连点按钮 / 启动检查撞在一起时，只跑一次
 async function checkUpdate(manual: boolean): Promise<"none" | "found" | "fail"> {
+  if (updateBusy) return "none";
+  updateBusy = true;
+  try {
+    return await runUpdateCheck(manual);
+  } finally {
+    updateBusy = false;
+  }
+}
+
+async function runUpdateCheck(manual: boolean): Promise<"none" | "found" | "fail"> {
   if (manual) setMsg("正在检查更新…");
   let info: UpdateInfo | null = null;
   try {
@@ -3479,8 +3490,9 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   if (!root) setMsg("就绪：点击左侧 ＋ 打开文件夹，或点 🔌 连接 SSH");
   void restoreDirty();
-  // 启动几秒后静默查一次更新（默认连不上也不吵）
-  setTimeout(() => void checkUpdate(false), 6000);
+  // 启动后静默查一次：只在主窗口、只在打包版。
+  // 多开窗口时每个窗口都查一遍没意义（还会弹好几个框）；开发时每次热重载都查一次，纯属给 GitHub 添堵
+  if (IS_MAIN && !import.meta.env.DEV) setTimeout(() => void checkUpdate(false), 6000);
 }
 
 // ---------- Diff（agent 提案审阅）----------
