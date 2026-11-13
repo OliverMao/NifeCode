@@ -506,7 +506,7 @@ body {
 
 #status {
   grid-row: 4; grid-column: 1 / 5; background: var(--status); color: #fff; display: flex; align-items: center;
-  gap: 14px; padding: 0 10px; font-size: calc(var(--ui) - 1px);
+  gap: 14px; padding: 0 10px; font-size: calc(var(--ui) - 2.5px); /* 只做提示，比界面字小一档，别抢视线的同时也不发脏 */
 }
 #status .spacer { flex: 1; }
 #st-msg { color: #e6f3ff; }
