@@ -1979,27 +1979,46 @@ async function deleteEntry(paths: string[]) {
 
 async function pasteInto(dir: string) {
   if (!clip) return;
-  const cmd = clip.cut ? "fs_rename" : "fs_copy";
-  const from = clip.paths;
-  const host_ = clip.host;
-  const port_ = clip.port;
+  const { cut, host: host_, port: port_ } = clip;
+  const cmd = cut ? "fs_rename" : "fs_copy";
+  const key = (p: string) => (host_ === null ? cleanPath(p).toLowerCase() : cleanPath(p));
+  // 剪切到原目录是空操作；复制到原目录则要换个名字（.env → .env.cp），不能盖掉自己
+  const from = clip.paths.filter((p) => !(cut && key(parentOf(p)) === key(dir)));
+  if (!from.length) {
+    setMsg("目标就是原位置");
+    return;
+  }
+
+  // 目标名被占了就补 .cp / .cp2 / .cp3 …：同目录复制、或目标目录里已有同名文件都不会再撞，也不覆盖
+  const names = from.map(baseName);
+  const picked: (string | null)[] = names.map(() => null);
+  const free = async (paths: string[]) =>
+    (await invoke<number[]>("stat_files", { host: host_, port: port_, paths }).catch(() => paths.map(() => 0))).map((t) => !t);
+  for (let round = 1; picked.some((x) => x === null) && round < 100; round++) {
+    const cand = picked.map((v, i) => v ?? (round === 1 ? names[i] : `${names[i]}.cp${round > 2 ? round - 1 : ""}`));
+    const ok = await free(cand.map((n) => joinPath(dir, n)));
+    cand.forEach((n, i) => {
+      if (picked[i] === null && ok[i]) picked[i] = n;
+    });
+  }
+
   let done = 0;
-  for (const p of from) {
-    const to = joinPath(dir, baseName(p));
-    if (to === p) continue; // 目标就是原位置，跳过
+  const renamed: string[] = [];
+  for (let i = 0; i < from.length; i++) {
+    const p = from[i];
+    const name = picked[i];
+    if (!name) continue; // 兜底：连着 99 个重名就放弃这一项
     try {
-      await invoke(cmd, { host: host_, port: port_, from: p, to });
+      await invoke(cmd, { host: host_, port: port_, from: p, to: joinPath(dir, name) });
       done += 1;
+      if (name !== baseName(p)) renamed.push(`${baseName(p)} → ${name}`);
     } catch (err) {
       setMsg(`粘贴失败：${baseName(p)} —— ${err}`);
     }
   }
-  if (!done) {
-    setMsg("目标就是原位置");
-    return;
-  }
-  setMsg(`${clip.cut ? "已移动" : "已复制"} ${done} 项到 ${dir}`);
-  if (clip.cut) clip = null;
+  if (!done) return;
+  setMsg(`${cut ? "已移动" : "已复制"} ${done} 项到 ${dir}${renamed.length ? `（重名改叫：${renamed.join("、")}）` : ""}`);
+  if (cut) clip = null;
   fileCache = null;
   await refreshTree();
 }
