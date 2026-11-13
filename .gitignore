@@ -7,3 +7,7 @@ shot.png
 .DS_Store
 .probe/
 crop.png
+
+# 打包产物（npx tauri build 后从 target/release 复制到根目录的那份）
+NifeCode_*_portable.exe
+NifeCode_*_setup.exe
