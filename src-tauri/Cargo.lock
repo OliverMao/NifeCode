@@ -2148,6 +2148,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

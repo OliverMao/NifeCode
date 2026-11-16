@@ -2,6 +2,7 @@
 // Copyright (C) 2026 OliverMao — NifeCode, 见仓库根目录 LICENSE
 mod bridge;
 mod cache;
+mod clip;
 mod fsops;
 mod proc;
 mod session;
@@ -61,6 +62,8 @@ pub fn run() {
             fsops::fs_copy,
             fsops::fs_reveal,
             fsops::list_files,
+            clip::clip_files,
+            clip::clip_set_files,
             fsops::find_repos,
             fsops::replace_all,
             fsops::read_binary,
@@ -85,6 +88,13 @@ pub fn run() {
             proc::open_url,
             git::git_info,
             git::git_head_file,
+            git::git_stage,
+            git::git_unstage,
+            git::git_discard,
+            git::git_revert,
+            git::git_remotes,
+            git::git_push,
+            git::git_pull,
             git::git_commit,
             update::update_check,
             update::update_install,

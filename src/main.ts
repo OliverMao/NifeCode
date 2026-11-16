@@ -274,7 +274,7 @@ function switchContext(id: string) {
     return;
   }
   if (root) void refreshTree();
-  if ($("#scm").classList.contains("active")) void loadGit();
+  if (root) void loadGit(); // 文件树的 git 着色也吃这份数据，不在源代码管理面板时也要拉
   else renderGit(null);
   // 切标签就把当前标签、以及上一个项目展开的文件夹落盘：异常退出/关窗口也能回到原样
   saveCtxs();
@@ -1032,10 +1032,10 @@ function hideTip() {
   $("#tip").classList.add("hidden");
 }
 
-/** 给一个"可能被截断"的元素挂上提示；text 是要显示的完整内容 */
-function bindTip(el: HTMLElement, measure: HTMLElement, text: () => string) {
+/** 给一个"可能被截断"的元素挂上提示；text 是要显示的完整内容。always = 不管没截断都显示 */
+function bindTip(el: HTMLElement, measure: HTMLElement, text: () => string, always = false) {
   el.addEventListener("mouseenter", (ev) => {
-    if (measure.scrollWidth <= measure.clientWidth + 1) return; // 没截断就不打扰
+    if (!always && measure.scrollWidth <= measure.clientWidth + 1) return; // 没截断就不打扰
     const e2 = ev as MouseEvent;
     if (tipTimer) clearTimeout(tipTimer);
     tipTimer = window.setTimeout(() => placeTip(text(), e2), 350);
@@ -1271,7 +1271,7 @@ function renderTabs(activePath?: string) {
     name.textContent = baseName(p);
     name.style.overflow = "hidden";
     name.style.textOverflow = "ellipsis";
-    bindTip(el, name, () => p);
+    bindTip(el, name, () => relPath(p), true);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
@@ -1311,7 +1311,7 @@ function renderTabs(activePath?: string) {
     name.append(ico, document.createTextNode(t.title));
     name.style.overflow = "hidden";
     name.style.textOverflow = "ellipsis";
-    bindTip(el, name, () => `${t.path}（对照）`);
+    bindTip(el, name, () => `${relPath(t.path)}（对照）`, true);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
@@ -1865,10 +1865,8 @@ function treeMenu(e: Entry, paths: string[]): MenuItem[] {
     { label: "新建文件", run: () => void newEntry(dir, false) },
     { label: "新建文件夹", run: () => void newEntry(dir, true) },
   ];
-  if (clip) {
-    const nm = clip.paths.length > 1 ? `${clip.paths.length} 项` : baseName(clip.paths[0]);
-    items.push({ label: `粘贴「${nm}」`, run: () => void pasteInto(dir) });
-  }
+  // 「本机总能粘」的判断在 pasteItem 里；这里只拼菜单
+  items.push(...pasteItem(dir));
   items.push("sep");
   if (multi) items.push({ label: `${paths.length} 项已选择`, run: () => {} });
   else if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
@@ -1914,8 +1912,30 @@ function relPath(p: string): string {
 
 function setClip(paths: string[], cut: boolean) {
   clip = { paths, host, port, cut };
+  // 系统剪贴板也放一份：一是在资源管理器/其它程序里 Ctrl+V 能直接粘这些文件（真文件，不只是路径），
+  // 二是顺手清掉剪贴板里上一次的「文件」——pasteInto 优先看系统剪贴板，不清会粘错东西
+  if (host === null) void invoke("clip_set_files", { paths }).catch(() => void writeText(paths.join("\n")).catch(() => {}));
+  else void writeText(paths.join("\n")).catch(() => {}); // 远端路径没法放进本机剪贴板，只给份文本
   const nm = paths.length > 1 ? `${paths.length} 项` : baseName(paths[0]);
   setMsg(`${cut ? "已剪切" : "已复制"} ${nm}`);
+}
+
+/** 右键菜单里的「粘贴」：本机总能粘（可能来自系统剪贴板），远端得有内部剪贴板
+ *
+ * 目标目录：选中的是文件夹就用它，选中的是文件就用它所在的目录，什么都没选就工作区根
+ */
+function pasteTarget(): string | null {
+  const one = sel.size === 1 ? [...sel][0] : null;
+  if (!one) return root;
+  const isDir = [...treeNodes()].some((n) => n.dataset.path === one && n.dataset.dir === "1");
+  return isDir ? one : parentOf(one);
+}
+
+/** 右键菜单里的「粘贴」项 */
+function pasteItem(dir: string): MenuItem[] {
+  if (!clip && host !== null) return []; // 远端没有系统剪贴板可用
+  const nm = clip ? (clip.paths.length > 1 ? `${clip.paths.length} 项` : baseName(clip.paths[0])) : "";
+  return [{ label: nm ? `粘贴「${nm}」` : "粘贴", run: () => void pasteInto(dir) }];
 }
 
 async function newEntry(dir: string, isDir: boolean) {
@@ -1978,7 +1998,16 @@ async function deleteEntry(paths: string[]) {
 }
 
 async function pasteInto(dir: string) {
-  if (!clip) return;
+  // Windows 资源管理器里 Ctrl+C 的文件在系统剪贴板里（CF_HDROP），优先用它：
+  // 内部复制会把路径写成文本、抹掉旧的 CF_HDROP，两边不会打架
+  const ext = await invoke<string[]>("clip_files").catch(() => [] as string[]);
+  if (ext.length) {
+    if (host !== null) { setMsg("从外面复制的文件只能粘到本机工作区"); return; }
+    clip = { paths: ext, host: null, port, cut: false };
+  }
+  if (!clip) { setMsg("剪贴板里没有文件"); return; }
+  // 剪贴板带着来源连接：本地标签里复制的文件不应该被粘到远端目录去
+  if (clip.host !== host) { setMsg("剪贴板里的文件来自另一个连接，切回那个标签再粘"); return; }
   const { cut, host: host_, port: port_ } = clip;
   const cmd = cut ? "fs_rename" : "fs_copy";
   const key = (p: string) => (host_ === null ? cleanPath(p).toLowerCase() : cleanPath(p));
@@ -2060,6 +2089,7 @@ async function refreshTree() {
   if (gen !== treeGen) return; // 期间又发起了一次刷新，这次的结果丢掉
   $("#tree").replaceChildren(...box.children);
   paintSel(); // 重建行以后把多选高亮补回来
+  paintGit();
   treeSig = "";
 }
 
@@ -2096,6 +2126,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     const row = document.createElement("div");
     row.className = "node";
     row.dataset.path = e.path;
+    if (e.is_dir) row.dataset.dir = "1"; // 粘贴要用：判断投中的是文件夹还是文件
     row.style.paddingLeft = `${8 + depth * 12}px`;
     const ico = document.createElement("span");
     ico.className = "ico";
@@ -2106,7 +2137,10 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
     row.append(ico, name);
     wrap.appendChild(row);
 
-    bindTip(row, name, () => e.path);
+    bindTip(row, name, () => {
+      const label = GIT_LABEL[gitMarks.get(e.path) ?? ""];
+      return label ? `${label} · ${e.path}` : e.path;
+    });
 
     const select = (ev: MouseEvent) => {
       treeFocus = true;
@@ -2154,6 +2188,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
           const sub = document.createElement("div");
           row.after(sub);
           await renderTree(e.path, sub, depth + 1);
+          paintGit();
         }
         void pollTree(true);
       };
@@ -2535,6 +2570,38 @@ function absJoin(rootDir: string, rel: string) {
 }
 
 let lastGitJson = "";
+// 资源管理器给文件名上色用的同一份 git 状态：绝对路径 → 单个状态字母
+const gitMarks = new Map<string, string>();
+
+const GIT_LABEL: Record<string, string> = {
+  U: "未跟踪",
+  A: "新增",
+  M: "已修改",
+  D: "已删除",
+  R: "重命名",
+  C: "有冲突",
+  T: "类型变更",
+};
+
+/** 本机 libgit2 给单个字母，SSH 给 porcelain 的 XY：统一成一个字母，未暂存的改动优先（和 VS Code 一致） */
+function gitLetter(status: string): string {
+  if (status === "??") return "U";
+  if (status.length < 2) return status;
+  const [x, y] = [status[0], status[1]];
+  // porcelain 里冲突是 DD/AU/UD/UA/DU/AA/UU 这几个组合
+  if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) return "C";
+  if (y !== " ") return y;
+  return x.trim() ? x : "";
+}
+
+/** 把 git 状态刷到文件树的行上（树是整棵重建的，重建后要补一遍） */
+function paintGit() {
+  for (const n of treeNodes()) {
+    const code = gitMarks.get(n.dataset.path ?? "");
+    if (code) n.dataset.git = code;
+    else delete n.dataset.git;
+  }
+}
 
 /** 源代码管理当前盯着的仓库目录（工作区根 或 根下面的某个子文件夹） */
 function gitCwd(): string | null {
@@ -2595,32 +2662,171 @@ function renderGit(info: GitInfo | null) {
   const json = JSON.stringify(info);
   if (json === lastGitJson) return; // 数据没变就别重建列表（4s 轮询会打断点击）
   lastGitJson = json;
+  // 资源管理器也用这份数据：文件名按状态上色
+  gitMarks.clear();
+  const cwd = gitCwd();
+  if (info?.repo && cwd) for (const f of info.files) gitMarks.set(absJoin(cwd, f.path), gitLetter(f.status));
+  paintGit();
   const branch = $<HTMLSpanElement>("#scm-branch");
   const list = $("#scm-list");
   list.innerHTML = "";
   if (!info) { branch.textContent = "—"; return; }
   if (!info.repo) { branch.textContent = "不是 git 仓库"; return; }
   branch.textContent = `⎇ ${info.branch || "(空仓库)"} · ${info.files.length} 个变更`;
-  for (const f of info.files) {
-    const row = document.createElement("div");
-    row.className = "scm-row";
-    const st = document.createElement("span");
-    const code = f.status === "??" ? "U" : f.status[0];
-    st.className = `st ${code}`;
-    st.textContent = f.status === "??" ? "U" : f.status[0];
-    st.title = f.status;
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = f.path;
-    name.title = f.path;
-    const diffBtn = document.createElement("span");
-    diffBtn.className = "diff";
-    diffBtn.textContent = "⇄";
-    diffBtn.title = "和 HEAD 对比";
-    diffBtn.onclick = (e) => { e.stopPropagation(); void openGitDiff(f.path); };
-    row.append(st, name, diffBtn);
-    row.onclick = () => void openFile(absJoin(gitCwd() ?? root!, f.path));
-    list.appendChild(row);
+  const base = cwd ?? root!;
+  // 和 VS Code 一样分两块：进了暂存区的放上面，还没暂存的（含未跟踪）放下面
+  const staged = info.files.filter((f) => f.status[0] !== " " && f.status[0] !== "?");
+  const changes = info.files.filter((f) => f.status[1] !== " " || f.status[0] === "?");
+  if (staged.length) {
+    list.append(
+      scmSec("已暂存的更改", staged.length, [
+        { label: "↺", title: "全部还原（退回上次提交）", fn: () => void revertGit(staged) },
+        { label: "−", title: "全部取消暂存", fn: () => void gitOp("git_unstage", staged.map((f) => f.path)) },
+      ]),
+    );
+    for (const f of staged) list.append(scmRow(f, "staged", base));
+  }
+  if (changes.length) {
+    list.append(
+      scmSec("更改", changes.length, [
+        { label: "↩", title: "全部放弃未暂存的改动", fn: () => void discardGit(changes) },
+        { label: "＋", title: "全部暂存", fn: () => void gitOp("git_stage", changes.map((f) => f.path)) },
+      ]),
+    );
+    for (const f of changes) list.append(scmRow(f, "changes", base));
+  }
+  if (!info.files.length) {
+    const empty = document.createElement("div");
+    empty.className = "scm-empty";
+    empty.textContent = "没有变更";
+    list.append(empty);
+  }
+}
+
+/** 一排小按钮：鼠标移到这一行/这一块才亮 */
+function scmAct(label: string, title: string, fn: () => void) {
+  const el = document.createElement("span");
+  el.className = "act";
+  el.textContent = label;
+  el.title = title;
+  el.onclick = (e) => {
+    e.stopPropagation();
+    fn();
+  };
+  return el;
+}
+
+/** 一块变更的标题行：标题 + 数量 + 整块操作 */
+function scmSec(title: string, count: number, acts: { label: string; title: string; fn: () => void }[]) {
+  const head = document.createElement("div");
+  head.className = "scm-sec";
+  const text = document.createElement("span");
+  text.className = "cnt";
+  text.textContent = `${title}（${count}）`;
+  head.append(text);
+  for (const a of acts) head.append(scmAct(a.label, a.title, a.fn));
+  return head;
+}
+
+/** 一行变更：状态码、文件名、右边淡色的目录；悬停才显出操作按钮 */
+function scmRow(f: GitFile, kind: "staged" | "changes", cwd: string) {
+  const row = document.createElement("div");
+  row.className = "scm-row";
+  const code = gitLetter(f.status);
+  const st = document.createElement("span");
+  st.className = `st ${code}`;
+  st.textContent = code;
+  st.title = GIT_LABEL[code] ?? f.status;
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = baseName(f.path);
+  const dirEl = document.createElement("span");
+  dirEl.className = "dir";
+  dirEl.textContent = f.path.slice(0, f.path.length - baseName(f.path).length);
+  dirEl.title = f.path;
+  row.append(st, name, dirEl, scmAct("⇄", "和上次提交对比", () => void openGitDiff(f.path)));
+  const open = () => (code === "D" ? void openGitDiff(f.path) : void openFile(absJoin(cwd, f.path)));
+  if (kind === "staged") {
+    row.append(scmAct("↺", "还原这个文件（退回上次提交）", () => void revertGit([f])));
+    row.append(scmAct("−", "取消暂存", () => void gitOp("git_unstage", [f.path])));
+  } else {
+    row.append(scmAct("＋", "暂存这个文件", () => void gitOp("git_stage", [f.path])));
+    // 暂存不影响工作区，两种操作各管一半：放弃只丢还没暂存的那部分
+    row.append(scmAct("↩", "放弃未暂存的更改（不能撤销）", () => void discardGit([f])));
+  }
+  row.onclick = open;
+  // 悬停按钮不明显，右键菜单里把同一套操作再摆一遍
+  row.oncontextmenu = (ev) => {
+    ev.preventDefault();
+    showMenu(ev.clientX, ev.clientY, [
+      { label: "打开文件", run: open },
+      { label: "和上次提交对比", run: () => void openGitDiff(f.path) },
+      "sep",
+      kind === "staged"
+        ? { label: "取消暂存", run: () => void gitOp("git_unstage", [f.path]) }
+        : { label: "暂存", run: () => void gitOp("git_stage", [f.path]) },
+      kind === "staged"
+        ? { label: "还原文件", run: () => void revertGit([f]) }
+        : { label: "放弃未暂存的更改", run: () => void discardGit([f]) },
+    ]);
+  };
+  return row;
+}
+
+/** 暂存 / 取消暂存：跑完强制重画列表和文件树上的颜色 */
+async function gitOp(cmd: "git_stage" | "git_unstage", paths: string[]) {
+  if (!paths.length) return;
+  try {
+    await invoke(cmd, { ...connArg(), cwd: gitCwd()!, paths });
+    lastGitJson = "";
+    await loadGit();
+  } catch (e) {
+    setMsg(`操作失败：${e}`);
+  }
+}
+
+/** 会改磁盘的 git 操作：跑完刷新列表和文件树（颜色和文件本身可能都变了） */
+async function afterGitOp() {
+  lastGitJson = "";
+  await loadGit();
+  await refreshTree();
+}
+
+/** 破坏性操作前先问一句，列出要动的文件 */
+async function askGit(title: string, files: GitFile[], why: string) {
+  const shown = files.slice(0, 10).map((f) => `<li>${f.path.replace(/</g, "&lt;")}</li>`).join("");
+  const more = files.length > 10 ? `<p>等 ${files.length} 个文件</p>` : "";
+  const r = await ask(title, `<p>${why}</p><ul>${shown}</ul>${more}`, [
+    { label: title, value: "ok", primary: true },
+    { label: "取消", value: "cancel" },
+  ]);
+  return r === "ok";
+}
+
+/** 放弃：只丢还没暂存过的那部分，暂存区里的不动 */
+async function discardGit(files: GitFile[]) {
+  if (!(await askGit("放弃更改", files, "这些文件还没暂存过的改动会被丢掉，不能撤销："))) return;
+  const untracked = files.filter((f) => f.status === "??").map((f) => f.path);
+  const tracked = files.filter((f) => f.status !== "??").map((f) => f.path);
+  try {
+    await invoke("git_discard", { ...connArg(), cwd: gitCwd()!, tracked, untracked });
+    await afterGitOp();
+  } catch (e) {
+    setMsg(`放弃失败：${e}`);
+  }
+}
+
+/** 还原文件：索引和工作区一起退回 HEAD；HEAD 里没有它（新增/重命名）的只能取消暂存 */
+async function revertGit(files: GitFile[]) {
+  if (!(await askGit("还原文件", files, "这些文件会退回上次提交的版本，暂存区和工作区的改动都会丢，不能撤销："))) return;
+  const back = files.filter((f) => f.status[0] !== "A" && f.status[0] !== "R").map((f) => f.path);
+  const added = files.filter((f) => f.status[0] === "A" || f.status[0] === "R").map((f) => f.path);
+  try {
+    if (back.length) await invoke("git_revert", { ...connArg(), cwd: gitCwd()!, paths: back });
+    if (added.length) await invoke("git_unstage", { ...connArg(), cwd: gitCwd()!, paths: added });
+    await afterGitOp();
+  } catch (e) {
+    setMsg(`还原失败：${e}`);
   }
 }
 
@@ -2649,7 +2855,7 @@ async function openGitDiff(rel: string) {
   openDiffTab(abs, oldText, newText, rel);
 }
 
-async function doCommit() {
+async function doCommit(push = false) {
   if (!root) return;
   const box = $<HTMLTextAreaElement>("#scm-msg");
   const message = box.value.trim();
@@ -2657,10 +2863,53 @@ async function doCommit() {
   try {
     const hash = await invoke<string>("git_commit", { ...connArg(), cwd: gitCwd()!, message });
     box.value = "";
-    setMsg(`已提交 ${hash}`);
+    lastGitJson = "";
     await loadGit();
+    if (push) await doPush(hash);
+    else setMsg(`已提交 ${hash}`);
   } catch (e) {
     setMsg(`提交失败：${e}`);
+  }
+}
+
+/** 推当前分支；多个 remote 时让人选（和 nife 的 `/commit --push` 一个脾气）。hash 是刚提交的那一下，用来说话 */
+async function doPush(hash = "") {
+  if (!root) return;
+  const lead = hash ? `已提交 ${hash}；` : "";
+  const cwd = gitCwd()!;
+  try {
+    const remotes = await invoke<string[]>("git_remotes", { ...connArg(), cwd });
+    if (!remotes.length) { setMsg(`${lead}这个仓库没有配置 remote，推不了`); return; }
+    let targets = remotes;
+    if (remotes.length > 1) {
+      const all = `全部（${remotes.join("、")}）`;
+      const r = await ask("推送到哪个 remote", `<p>当前仓库有 ${remotes.length} 个 remote：</p>`, [
+        { label: all, value: all, primary: true },
+        ...remotes.map((x) => ({ label: x, value: x })),
+        { label: "取消", value: "cancel" },
+      ]);
+      if (r === "cancel" || !r) return;
+      targets = r === all ? remotes : [r];
+    }
+    const results = await invoke<{ remote: string; ok: boolean; error: string }[]>("git_push", { ...connArg(), cwd, remotes: targets });
+    const bad = results.filter((x) => !x.ok);
+    if (!bad.length) setMsg(`${lead}已推送到 ${targets.join("、")}`);
+    else setMsg(`${lead}推送失败：${bad.map((x) => `${x.remote}（${x.error}）`).join("；")}`);
+    lastGitJson = "";
+    await loadGit();
+  } catch (e) {
+    setMsg(`推送失败：${e}`);
+  }
+}
+
+async function doPull() {
+  if (!root) return;
+  try {
+    const out = await invoke<string>("git_pull", { ...connArg(), cwd: gitCwd()! });
+    setMsg(`已拉取：${out.split("\n")[0] || "已是最新"}`);
+    await afterGitOp(); // 工作区可能变了好几个文件，树和标签都得跟上
+  } catch (e) {
+    setMsg(`拉取失败：${e}`);
   }
 }
 
@@ -3064,10 +3313,7 @@ async function boot() {
       { label: "新建文件", run: () => void newEntry(root!, false) },
       { label: "新建文件夹", run: () => void newEntry(root!, true) },
     ];
-    if (clip) {
-      const nm = clip.paths.length > 1 ? `${clip.paths.length} 项` : baseName(clip.paths[0]);
-      items.push({ label: `粘贴「${nm}」`, run: () => void pasteInto(root!) });
-    }
+    items.push(...pasteItem(root!));
     items.push("sep", { label: "复制工作区路径", run: () => void copyText(root!) });
     showMenu(ev.clientX, ev.clientY, items);
   });
@@ -3151,6 +3397,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     void loadGit();
   };
   $<HTMLButtonElement>("#scm-do").onclick = () => void doCommit();
+  $<HTMLButtonElement>("#scm-push").onclick = () => void doCommit(true);
+  $<HTMLButtonElement>("#scm-pull").onclick = () => void doPull();
   $<HTMLTextAreaElement>("#scm-msg").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void doCommit(); }
   });
@@ -3184,7 +3432,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       $("#ssh-panel").classList.toggle("active", act === "ssh");
       if (act === "ssh") renderSsh();
       $<HTMLSpanElement>("#sidebar-title").textContent = titles[act ?? "explorer"] ?? "资源管理器";
-      if (act === "scm") void loadGit();
+      if (act === "scm" || act === "explorer") void loadGit();
       if (act === "search") $<HTMLInputElement>("#search-input").focus();
       // 点回资源管理器时把文件树对齐到当前文件（可能是之前在搜索面板里打开的文件）
       if (act === "explorer") void revealInTree(editor.current()?.path);
@@ -3424,6 +3672,22 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     }
   });
 
+  // 资源管理器键盘：Ctrl+C / Ctrl+X / Ctrl+V。粘贴目标见 pasteTarget()
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+    if (!treeFocus || !root) return;
+    const k = e.key.toLowerCase();
+    if (k === "v") {
+      e.preventDefault();
+      const dir = pasteTarget();
+      if (dir) void pasteInto(dir);
+      return;
+    }
+    if ((k !== "c" && k !== "x") || sel.size === 0) return;
+    e.preventDefault();
+    setClip([...sel], k === "x");
+  });
+
   // 缩放放在捕获阶段：编辑器聚焦时 Monaco 会先把按键吃掉，捕获能保证我们先处理
   document.addEventListener("keydown", (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
@@ -3497,7 +3761,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   }, host ? 10000 : 1200); // 远端一次轮询就是一次完整 ssh 往返，别太勤
   setInterval(() => {
     if (document.hidden || offlineCtx()) return; // 最小化时别一直跑 status
-    if ($("#scm").classList.contains("active")) void loadGit();
+    const explorerOn = !$("#sidebar").classList.contains("collapsed") && !$("#tree").classList.contains("hidden");
+    if ($("#scm").classList.contains("active") || explorerOn) void loadGit();
   }, 8000);
   // 文件树自动刷新：只 stat 根目录 + 已展开的目录，变了才重画
   setInterval(() => {

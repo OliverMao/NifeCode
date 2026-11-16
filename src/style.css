@@ -270,10 +270,18 @@ body {
 .scm-row .st.A, .scm-row .st.U { color: #73c991; }
 .scm-row .st.D { color: #f14c4c; }
 .scm-row .st.R { color: #73c991; }
-.scm-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.scm-row .diff { opacity: 0; color: var(--fg-dim); }
-.scm-row:hover .diff { opacity: .9; }
-.scm-commit { border-top: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.scm-row .st.T { color: #e2c08d; }
+.scm-row .st.C { color: #f14c4c; }
+.scm-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.scm-row .dir { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-dim); font-size: 11px; }
+/* 分区标题：已暂存 / 更改，整块的暂存/取消暂存按钮在右边 */
+.scm-sec { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; color: var(--fg-dim); background: #252526; position: sticky; top: 0; }
+.scm-sec .cnt { flex: 1; }
+.scm-empty { padding: 10px; font-size: 12px; color: var(--fg-dim); }
+.act { opacity: 0; color: var(--fg-dim); cursor: pointer; padding: 0 2px; }
+.scm-row:hover .act, .scm-sec:hover .act { opacity: .9; }
+.act:hover { color: #fff; }
+.scm-commit { border-bottom: 1px solid var(--border); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .scm-commit textarea {
   height: 54px; resize: vertical; background: #3c3c3c; border: 1px solid #555;
   color: #eee; padding: 5px 6px; border-radius: 2px; font: inherit;
@@ -282,6 +290,10 @@ body {
   background: var(--accent); color: #fff; border: 0; padding: 5px 10px; border-radius: 2px;
   cursor: pointer; font: inherit;
 }
+.scm-btns { display: flex; gap: 6px; }
+.scm-btns button { flex: 1; white-space: nowrap; }
+.scm-commit button.ghost { background: #3c3c3c; }
+.scm-commit button.ghost:hover { background: #4a4a4a; filter: none; }
 .scm-commit button:hover { filter: brightness(1.15); }
 .node {
   display: flex; align-items: center; gap: 4px; padding: 2px 8px; cursor: pointer;
@@ -294,6 +306,10 @@ body {
 .node .ico svg { display: block; width: calc(var(--ui) + 2px); height: calc(var(--ui) + 2px); }
 .node .name { overflow: hidden; text-overflow: ellipsis; }
 .node .badge { margin-left: auto; font-size: 10px; color: #e2c08d; }
+/* 文件名按 git 状态着色，配色和源代码管理面板一致 */
+.node[data-git="M"] .name, .node[data-git="T"] .name { color: #e2c08d; }
+.node[data-git="A"] .name, .node[data-git="U"] .name, .node[data-git="R"] .name { color: #73c991; }
+.node[data-git="D"] .name, .node[data-git="C"] .name { color: #f14c4c; }
 
 #main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
 

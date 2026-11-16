@@ -70,11 +70,15 @@
             <span class="spacer"></span>
             <button id="scm-refresh" title="刷新">⟳</button>
           </div>
-          <div id="scm-list"></div>
           <div class="scm-commit">
             <textarea id="scm-msg" placeholder="提交信息（Ctrl+Enter 提交）"></textarea>
-            <button id="scm-do">提交全部更改</button>
+            <div class="scm-btns">
+              <button id="scm-do" title="提交暂存区里的更改">提交</button>
+              <button id="scm-push" class="ghost" title="提交后推送到 remote">提交并推送</button>
+              <button id="scm-pull" class="ghost" title="git pull --ff-only（只快进，不产生 merge 提交）">拉取</button>
+            </div>
           </div>
+          <div id="scm-list"></div>
         </div>
       </div>
 
