@@ -86,14 +86,9 @@ body {
 .ctx-tab.tearing { opacity: .55; outline: 1px dashed var(--accent2); outline-offset: -3px; cursor: grabbing; }
 .ctx-tab .x { opacity: .55; padding: 0 3px; }
 .ctx-tab .x:hover { opacity: 1; background: rgba(255,255,255,.12); border-radius: 3px; }
-#ctx-new {
-  background: transparent; border: 0; color: var(--fg-dim);
-  cursor: pointer; padding: 0 12px; font-size: 13px;
-  display: inline-flex; align-items: center;
-}
-#ctx-new:hover { color: #fff; background: #2a2d2e; }
 
-#activity { grid-row: 3 / 4; background: #333333; display: flex; flex-direction: column; }
+/* 每列都钉死 grid-column：收起时某一列是 display:none，自动排列会让后面的格子整体左移，编辑器跑到 0 宽的列里 */
+#activity { grid-row: 3 / 4; grid-column: 1; background: #333333; display: flex; flex-direction: column; }
 #activity button {
   width: 48px; height: 48px; border: 0; background: transparent; color: #858585;
   cursor: pointer; border-left: 2px solid transparent;
@@ -144,7 +139,7 @@ body {
 #modal .set-row button.mini:disabled { opacity: .6; cursor: default; }
 .set-foot { margin-top: 14px; color: var(--fg-dim); font-size: calc(var(--ui) - 2px); text-align: center; }
 
-#sidebar { background: var(--bg-side); display: flex; flex-direction: column; overflow: hidden; }
+#sidebar { grid-row: 3 / 4; grid-column: 2; background: var(--bg-side); display: flex; flex-direction: column; overflow: hidden; }
 #sidebar.hidden, #sidebar.collapsed { display: none; }
 .head {
   display: flex; align-items: center; gap: 6px; padding: 6px 10px;
@@ -191,59 +186,103 @@ body {
 .ctx-tab.offline .x { opacity: .8; }
 #search-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
 #search-panel.active { display: flex; }
-.search-box { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
-.search-box .replace-row { display: flex; gap: 6px; }
-.search-box .replace-row #replace-input { flex: 1; }
+/* 面板头：标题 + 右侧几个小图标（和 SSH / SCM 面板一个模子） */
+.search-head {
+  display: flex; align-items: center; gap: 2px; padding: 6px 10px; font-size: calc(var(--ui) - 1px);
+  color: var(--fg); border-bottom: 1px solid var(--border);
+}
+.search-head .spacer { flex: 1; }
+.search-head button {
+  width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent;
+  color: var(--fg-dim); font-size: 12px; line-height: 20px; cursor: pointer;
+}
+.search-head button:hover { background: var(--hover); color: #fff; }
+.search-box { padding: 8px 10px 9px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.se-row { display: flex; gap: 6px; align-items: center; }
+.se-indent { padding-left: 18px; } /* 替换框和搜索框左边对齐（让出折叠箭头的位置） */
+#se-repl-toggle {
+  flex: none; width: 12px; height: 26px; padding: 0; border: 0; background: transparent;
+  color: var(--fg-dim); font-size: 10px; line-height: 26px; cursor: pointer;
+}
+#se-repl-toggle:hover { color: var(--fg); }
+/* 输入框：26px 高、细边框，聚焦时一圈品牌紫；三个开关浮在右边（和 VS Code 一样） */
+.se-field { position: relative; display: flex; align-items: center; flex: 1; min-width: 0; }
+.se-field input {
+  width: 100%; height: 26px; padding: 0 8px; font: inherit; font-size: calc(var(--ui) - 0.5px);
+  color: var(--fg); background: #313131; border: 1px solid #3c3c3c; border-radius: 2px;
+}
+.se-field input::placeholder { color: #8a8a8a; }
+.se-field input:focus { outline: none; border-color: var(--accent-fg); }
+#search-input { padding-right: 62px; }
+#replace-input { padding-right: 26px; }
+/* 包含/排除两个输入框（⋯ 展开） */
+.se-files { display: flex; flex-direction: column; gap: 4px; padding-left: 18px; }
+.se-files.hidden { display: none; }
+.se-files .se-field input { font-size: calc(var(--ui) - 1.5px); }
+.se-togs { position: absolute; right: 4px; display: flex; gap: 2px; }
+.se-tog {
+  width: 18px; height: 18px; padding: 0; border: 1px solid transparent; border-radius: 2px;
+  background: transparent; color: #9d9d9d;
+  font: calc(var(--ui) - 1.5px)/16px ui-monospace, Consolas, monospace; cursor: pointer;
+}
+.se-tog:hover { background: var(--hover); color: var(--fg); }
+.se-tog.on { color: #e7e7e7; border-color: #6a6a6a; background: #3a3a3a; }
+#se-scope { display: flex; align-items: center; gap: 4px; padding-left: 18px; font-size: calc(var(--ui) - 2px); color: var(--fg-dim); }
+#se-scope #se-scope-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-fg); }
+.se-scope button {
+  flex: none; padding: 2px 3px; border: none; border-radius: 3px; background: transparent;
+  color: var(--fg-dim); font-size: 11px; line-height: 1; cursor: pointer;
+}
+.se-scope button:hover { background: var(--hover); color: var(--fg); }
+#se-scope.hidden { display: none; } /* 项目里没有通用的 .hidden，只认 #id.hidden 这套 */
+#se-replace.hidden { display: none; }
 #replace-all {
-  background: #3a3d41; color: #eee; border: 1px solid #555; border-radius: 2px;
-  padding: 0 10px; font: inherit; cursor: pointer; white-space: nowrap;
+  flex: none; height: 26px; padding: 0 9px; font: inherit; font-size: calc(var(--ui) - 1.5px); cursor: pointer;
+  color: #d7d7d7; background: #3a3d41; border: 1px solid #4a4d51; border-radius: 2px; white-space: nowrap;
 }
-#replace-all:hover { background: #4a4d51; }
-#replace-input {
-  width: 100%; background: #3c3c3c; border: 1px solid #555; color: #eee;
-  padding: 5px 8px; border-radius: 2px; font: inherit;
-}
-#search-input {
-  width: 100%; background: #3c3c3c; border: 1px solid #555; color: #eee;
-  padding: 5px 8px; border-radius: 2px; font: inherit;
-}
+#replace-all:hover { background: #45494e; color: #fff; }
 #search-list { flex: 1; overflow: auto; padding-bottom: 6px; }
-/* 汇总行 */
+/* 汇总行：吸顶，淡淡的 */
 .sr-sum {
-  padding: 6px 10px; font-size: 11px; color: var(--fg-dim);
-  position: sticky; top: 0; background: var(--bg-side); border-bottom: 1px solid var(--border); z-index: 1;
+  position: sticky; top: 0; z-index: 1; padding: 5px 10px; font-size: calc(var(--ui) - 2.5px);
+  color: var(--fg-dim); background: var(--bg-side); border-bottom: 1px solid var(--border);
 }
-.sr-empty { padding: 10px; font-size: 12px; color: var(--fg-dim); }
+.sr-empty { padding: 12px 10px; font-size: calc(var(--ui) - 1.5px); color: var(--fg-dim); line-height: 1.6; white-space: pre-wrap; }
 /* 文件分组标题：图标 + 目录（暗） + 文件名 + 命中数 */
 .sr-head {
-  display: flex; align-items: center; gap: 6px; padding: 4px 10px 3px; cursor: pointer;
-  font-size: calc(var(--ui) - 1px); color: var(--accent-fg);
+  position: relative; display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 8px;
+  cursor: pointer; font-size: calc(var(--ui) - 1px); color: var(--fg);
 }
 .sr-head:hover { background: var(--hover); }
-.sr-head .ico { display: flex; width: 14px; height: 14px; flex: none; }
-.sr-head .ico svg { width: 14px; height: 14px; }
+/* 折叠箭头 + 行内的 ⇄ 替换按钮（只在替换模式下出现，悬停才亮） */
+.sr-chev { flex: none; width: 10px; font-size: 9px; color: var(--fg-dim); }
+/* 绝对定位：悬停时冒出来也不推挤文字 */
+.sr-act {
+  position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+  width: 16px; height: 16px; padding: 0; border: 0; border-radius: 3px; background: var(--bg-side);
+  color: var(--fg-dim); font-size: 11px; line-height: 16px; cursor: pointer; opacity: 0;
+}
+.sr-head .sr-act { right: 32px; } /* 让开右边的命中数胶囊 */
+.sr-head:hover .sr-act, .sr-row:hover .sr-act, .sr-act:focus { opacity: 1; }
+.sr-act:hover { background: #4a4d51; color: #fff; }
+.sr-head .ico { display: flex; width: 13px; height: 13px; flex: none; }
+.sr-head .ico svg { width: 13px; height: 13px; }
 .sr-file { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sr-dir { color: var(--fg-dim); }
 .sr-num {
-  flex: none; min-width: 18px; text-align: center; font-size: 10px; color: var(--fg-dim);
-  background: #37373d; border-radius: 8px; padding: 0 5px; line-height: 15px;
+  flex: none; min-width: 17px; padding: 0 4px; font-size: 10px; line-height: 14px; text-align: center;
+  color: var(--fg-dim); background: #37373d; border-radius: 7px;
 }
-/* 命中行：行号（等宽、暗） + 内容，命中处紫色高亮 */
-.sr-row {
-  display: flex; gap: 8px; padding: 2px 10px 2px 22px; cursor: pointer;
-  border-bottom: 1px solid #1f1f1f;
-}
+/* 命中行：只有一行片段，命中处紫色高亮（行高固定，扫得快） */
+.sr-row { position: relative; display: flex; align-items: center; height: 20px; padding: 0 10px 0 27px; cursor: pointer; }
 .sr-row:hover { background: var(--hover); }
-.sr-line {
-  flex: none; min-width: 26px; text-align: right; color: var(--fg-dim);
-  font-family: Consolas, "Cascadia Mono", monospace; font-size: calc(var(--ui) - 2px); line-height: 17px;
-}
 .sr-text {
-  flex: 1; min-width: 0; font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: calc(var(--ui) - 1.5px); line-height: 17px; color: var(--fg);
-  overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre;
+  font: calc(var(--ui) - 2px)/20px Consolas, "Cascadia Mono", monospace; color: #bdbdbd;
 }
-.sr-text mark { background: #5a3d7a; color: #f0e6ff; border-radius: 2px; }
+/* 替换模式（行里有 ⇄）时给右边留出按钮的位置，别被压字 */
+#search-list:has(.sr-act) .sr-text { padding-right: 18px; }
+.sr-text mark { background: rgba(180, 138, 224, .25); color: #f2e9ff; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(180, 138, 224, .35); }
 
 /* ---------- 源代码管理 ---------- */
 #scm { display: none; flex: 1; min-height: 0; flex-direction: column; }
@@ -302,6 +341,9 @@ body {
 .node:hover { background: var(--hover); }
 .node.current { background: rgba(180, 138, 224, .12); } /* 文件页当前看的文件；选中样式在它后面，选中时盖住这条 */
 .node.active { background: var(--sel); }
+/* 多根工作区：根目录那一行比子项粗一点，像 VS Code 的文件夹标题 */
+.node.root .name { font-weight: 600; }
+.node.root { margin-top: 2px; }
 .node .ico { width: calc(var(--ui) + 3px); height: calc(var(--ui) + 3px); flex: none; display: flex; align-items: center; justify-content: center; }
 .node .ico svg { display: block; width: calc(var(--ui) + 2px); height: calc(var(--ui) + 2px); }
 .node .name { overflow: hidden; text-overflow: ellipsis; }
@@ -311,7 +353,7 @@ body {
 .node[data-git="A"] .name, .node[data-git="U"] .name, .node[data-git="R"] .name { color: #73c991; }
 .node[data-git="D"] .name, .node[data-git="C"] .name { color: #f14c4c; }
 
-#main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+#main { grid-row: 3 / 4; grid-column: 3; display: flex; flex-direction: column; overflow: hidden; position: relative; }
 
 /* 图片预览：盖在编辑器上的一层 */
 #doc-view { position: absolute; inset: 35px 0 0 0; background: #1e1e1e; display: flex; flex-direction: column; z-index: 4; }
@@ -424,6 +466,7 @@ body {
 
 /* ---------- 终端列（右侧，可堆叠多个终端 + 标签页） ---------- */
 #term-col {
+  grid-row: 3 / 4; grid-column: 4;
   position: relative;
   display: flex; flex-direction: column;
   background: var(--bg); border-left: 1px solid var(--border); overflow: hidden;
@@ -432,7 +475,11 @@ body {
 /* ＋ 和它右边的类型小三角算一组，别被按钮间距撑开 */
 #btn-term-type { margin-left: -6px; padding-left: 2px; padding-right: 2px; }
 #btn-term-type svg { width: 10px; height: 10px; }
-#app.no-term { grid-template-columns: 48px 260px 1fr; }
+/* 收起侧栏/终端列时对应列宽要归零，否则只是 display:none，列还占着宽度 → 右边一大块空白 */
+#app:has(#sidebar.collapsed), #app:has(#sidebar.hidden) { grid-template-columns: 48px 0 1fr var(--term-w, 420px); }
+#app:has(#term-col.collapsed) { grid-template-columns: 48px var(--side-w, 260px) 1fr; }
+#app:has(#sidebar.collapsed):has(#term-col.collapsed),
+#app:has(#sidebar.hidden):has(#term-col.collapsed) { grid-template-columns: 48px 0 1fr; }
 
 #term-splitter, #side-splitter {
   position: absolute; left: -5px; top: 0; bottom: 0; width: 10px;
@@ -534,6 +581,8 @@ body {
 #st-md { cursor: pointer; opacity: .85; }
 #st-md:hover { opacity: 1; text-decoration: underline; }
 #st-md.on { text-decoration: underline; opacity: 1; }
+#st-ws { cursor: pointer; opacity: .85; display: none; }
+#st-ws:hover { opacity: 1; text-decoration: underline; }
 #st-term.off:hover { opacity: .9; }
 #st-about { cursor: pointer; opacity: .85; }
 #st-about:hover { opacity: 1; text-decoration: underline; }

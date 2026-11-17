@@ -625,6 +625,9 @@ pub async fn ssh_home(target: String, port: u16) -> Result<String, String> {
 pub struct SearchHit {
     pub path: String,
     pub line: u32,
+    /// 命中在这行里的起始字符位置（0 基）和长度（字符数）；远端正则搜拿不到，前端退回子串高亮
+    pub col: u32,
+    pub len: u32,
     pub text: String,
 }
 
@@ -679,8 +682,141 @@ fn walker(root: &std::path::Path) -> impl Iterator<Item = ignore::DirEntry> {
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
 }
 
-fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<SearchHit>) {
-    let needle = query.as_bytes();
+/// 搜索用的匹配器：普通子串（可忽略大小写、可整词）或正则。错误（正则写错）直接给前端看
+struct Matcher {
+    re: Option<regex::Regex>,
+    needle: String,
+    lower: String,
+    ci: bool,
+    whole: bool,
+}
+
+impl Matcher {
+    fn new(query: &str, ci: bool, whole: bool, regex: bool) -> Result<Self, String> {
+        if regex {
+            // 整词 = 两边加 ；用户自己写正则时也可能带括号，用 (?:) 包一层别破坏优先级
+            let pat = if whole { format!(r"\b(?:{query})\b") } else { query.to_string() };
+            let re = regex::RegexBuilder::new(&pat)
+                .case_insensitive(ci)
+                .build()
+                .map_err(|e| format!("正则写法有问题：{e}"))?;
+            return Ok(Self { re: Some(re), needle: String::new(), lower: String::new(), ci, whole });
+        }
+        Ok(Self {
+            re: None,
+            needle: query.to_string(),
+            lower: query.to_lowercase(),
+            ci,
+            whole,
+        })
+    }
+
+    /// 这行里所有命中的（起始字符下标, 字符长度）
+    fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        if let Some(re) = &self.re {
+            for m in re.find_iter(line) {
+                let start = line[..m.start()].chars().count();
+                out.push((start, m.as_str().chars().count()));
+            }
+            return out;
+        }
+        if self.needle.is_empty() {
+            return out;
+        }
+        // 忽略大小写时在 lowercase 副本上找：区间按字符算，普通文本完全对得上
+        let (hay, nee) = if self.ci { (line.to_lowercase(), self.lower.clone()) } else { (line.to_string(), self.needle.clone()) };
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let mut from = 0;
+        while let Some(at) = hay[from..].find(&nee) {
+            let start = from + at;
+            let end = start + nee.len();
+            let ok = !self.whole
+                || (hay[..start].chars().next_back().map(|c| !is_word(c)).unwrap_or(true)
+                    && hay[end..].chars().next().map(|c| !is_word(c)).unwrap_or(true));
+            if ok {
+                out.push((hay[..start].chars().count(), nee.chars().count()));
+            }
+            from = end.max(start + 1);
+            if from >= hay.len() {
+                break;
+            }
+        }
+        out
+    }
+}
+
+/// 包含/排除用的 glob 集合。逗号或分号分隔，语义照 VS Code：
+/// `**` 跨目录、`*` 不跨、`?` 一个字符；没有 `/` 的写法（如 `*.ts`）当作 `**/*.ts`
+struct Globs {
+    include: Vec<regex::Regex>,
+    exclude: Vec<regex::Regex>,
+}
+
+impl Globs {
+    fn new(include: &str, exclude: &str) -> Self {
+        let build = |s: &str| -> Vec<regex::Regex> {
+            s.split([',', ';'])
+                .map(|x| x.trim())
+                .filter(|x| !x.is_empty())
+                .filter_map(|x| regex::Regex::new(&glob_to_re(x)).ok())
+                .collect()
+        };
+        Self { include: build(include), exclude: build(exclude) }
+    }
+
+    /// rel 是相对搜索根、用 / 分隔的路径
+    fn allows(&self, rel: &str) -> bool {
+        if !self.include.is_empty() && !self.include.iter().any(|r| r.is_match(rel)) {
+            return false;
+        }
+        !self.exclude.iter().any(|r| r.is_match(rel))
+    }
+}
+
+/// glob → 正则：`**/` 可以一个目录都没有，`**` 任意深度，`*` 不跨目录
+fn glob_to_re(pat: &str) -> String {
+    let pat = if pat.contains('/') { pat.to_string() } else { format!("**/{pat}") };
+    let b = pat.as_bytes();
+    let mut out = String::from("^");
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'*' => {
+                if i + 1 < b.len() && b[i + 1] == b'*' {
+                    i += 2;
+                    if i < b.len() && b[i] == b'/' {
+                        out.push_str("(?:.*/)?"); // **/ 也匹配根上的文件
+                        i += 1;
+                    } else {
+                        out.push_str(".*");
+                    }
+                } else {
+                    out.push_str("[^/]*");
+                    i += 1;
+                }
+            }
+            b'?' => {
+                out.push_str("[^/]");
+                i += 1;
+            }
+            _ => {
+                let ch = pat[i..].chars().next().unwrap();
+                if "\\^$.|+()[]{}".contains(ch) {
+                    out.push('\\');
+                }
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out.push('$');
+    out
+}
+
+fn walk_search(root: &std::path::Path, m: &Matcher, globs: &Globs, max: usize, out: &mut Vec<SearchHit>) {
+    // 只有最朴素的那种（区分大小写、非正则）才能用字节预筛，省掉整份解码
+    let needle: Option<Vec<u8>> = if m.re.is_none() && !m.ci { Some(m.needle.clone().into_bytes()) } else { None };
     for e in walker(root) {
         if out.len() >= max {
             return;
@@ -694,16 +830,26 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
             continue; // 二进制
         }
         // 先在原始字节里找一遍：没命中就不做编码探测和解码（大仓里绝大多数文件都是这一支）
-        if !has_bytes(&bytes, needle) {
+        if let Some(n) = &needle {
+            if !has_bytes(&bytes, n) {
+                continue;
+            }
+        }
+        let rel = e.path().strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        if !globs.allows(&rel) {
             continue;
         }
         let (text, _) = decode_bytes(&bytes, None);
         for (i, line) in text.lines().enumerate() {
-            if line.contains(query) {
+            // 每处命中算一行（和 VS Code 的匹配计数一致）；超长行按 200 字符截断
+            let shown: String = line.trim_end().chars().take(200).collect();
+            for (col, len) in m.find_all(&shown) {
                 out.push(SearchHit {
                     path: e.path().to_string_lossy().replace('\\', "/"),
                     line: (i + 1) as u32,
-                    text: line.trim().chars().take(200).collect(),
+                    col: col as u32,
+                    len: len as u32,
+                    text: shown.clone(),
                 });
                 if out.len() >= max {
                     return;
@@ -713,13 +859,85 @@ fn walk_search(root: &std::path::Path, query: &str, max: usize, out: &mut Vec<Se
     }
 }
 
+/// 大小写跟随原文：全大写 → 全大写；全小写 → 全小写；首字母大写 → 首字母大写；其它原样
+fn match_case(matched: &str, rep: &str) -> String {
+    let letters: Vec<char> = matched.chars().filter(|c| c.is_alphabetic()).collect();
+    if letters.is_empty() {
+        return rep.to_string();
+    }
+    if letters.iter().all(|c| c.is_uppercase()) {
+        return rep.to_uppercase();
+    }
+    if letters.iter().all(|c| c.is_lowercase()) {
+        return rep.to_lowercase();
+    }
+    let mut it = rep.chars();
+    match it.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + &it.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// 把文本里所有命中的换成 replacement，返回（新文本, 换了几处）。命中不跨行，行尾原样保留
+fn replace_text(text: &str, m: &Matcher, replacement: &str, preserve_case: bool) -> (String, usize) {
+    let mut count = 0;
+    let mut out = String::with_capacity(text.len() + 16);
+    for line in text.split_inclusive('\n') {
+        let (body, eol) = match line.strip_suffix("\r\n") {
+            Some(b) => (b, "\r\n"),
+            None => match line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (line, ""),
+            },
+        };
+        let spans = m.find_all(body);
+        if spans.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let chars: Vec<char> = body.chars().collect();
+        let mut at = 0;
+        for (col, len) in spans {
+            let end = (col + len).min(chars.len());
+            let rep = if preserve_case {
+                match_case(&chars[col.min(end)..end].iter().collect::<String>(), replacement)
+            } else {
+                replacement.to_string()
+            };
+            out.extend(&chars[at..col.min(end)]);
+            out.push_str(&rep);
+            at = end;
+            count += 1;
+        }
+        out.extend(&chars[at.min(chars.len())..]);
+        out.push_str(eol);
+    }
+    (out, count)
+}
+
 /// 把本地文件里的 query 换成 replacement，返回动过的文件（相对路径）
-fn walk_replace(root: &std::path::Path, query: &str, to: &str, max: usize) -> Vec<String> {
+/// 本地替换。`only` 非空时只动这几个文件（逐文件替换用）
+fn walk_replace(
+    root: &std::path::Path,
+    m: &Matcher,
+    to: &str,
+    preserve_case: bool,
+    globs: &Globs,
+    only: &[String],
+    max: usize,
+) -> Vec<String> {
     let mut changed = Vec::new();
-    let needle = query.as_bytes();
     for e in walker(root) {
         if changed.len() >= max {
             break;
+        }
+        let rel = e.path().strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        if !only.is_empty() {
+            if !only.iter().any(|p| p == &rel) {
+                continue;
+            }
+        } else if !globs.allows(&rel) {
+            continue;
         }
         let Ok(meta) = e.metadata() else { continue };
         if meta.len() > 2 * 1024 * 1024 {
@@ -729,22 +947,65 @@ fn walk_replace(root: &std::path::Path, query: &str, to: &str, max: usize) -> Ve
         if bytes.iter().take(4096).any(|&b| b == 0) {
             continue;
         }
-        if !has_bytes(&bytes, needle) {
-            continue;
-        }
         let (text, enc) = decode_bytes(&bytes, None);
-        if !text.contains(query) {
+        let (next, n) = replace_text(&text, m, to, preserve_case);
+        if n == 0 {
             continue;
         }
-        let next = text.replace(query, to);
         let Ok(out) = encode_text(&next, &enc) else { continue };
         if std::fs::write(e.path(), out).is_ok() {
-            if let Ok(rel) = e.path().strip_prefix(root) {
-                changed.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+            changed.push(rel);
         }
     }
     changed
+}
+
+/// 只改一处命中（搜索结果里那一行的那个区间）：先校对原文还是原来的样子，变过就报错不用乱改
+#[tauri::command]
+pub async fn replace_at(
+    host: Option<String>,
+    port: u16,
+    path: String,
+    line: u32,
+    col: u32,
+    len: u32,
+    expect: String,
+    replacement: String,
+    preserve_case: bool,
+) -> Result<(), String> {
+    let file = read_file(host.clone(), port, path.clone(), None).await?;
+    let mut out = String::with_capacity(file.content.len() + 16);
+    let mut hit_line = false;
+    for (i, l) in file.content.split_inclusive('\n').enumerate() {
+        if i as u32 + 1 != line {
+            out.push_str(l);
+            continue;
+        }
+        hit_line = true;
+        let (body, eol) = match l.strip_suffix("\r\n") {
+            Some(b) => (b, "\r\n"),
+            None => match l.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (l, ""),
+            },
+        };
+        let chars: Vec<char> = body.chars().collect();
+        let start = col as usize;
+        let end = (start + len as usize).min(chars.len());
+        if start > chars.len() || chars[start..end].iter().collect::<String>() != expect {
+            return Err("这行已经变过了，重新搜一下再替换".into());
+        }
+        let rep = if preserve_case { match_case(&expect, &replacement) } else { replacement.clone() };
+        out.extend(&chars[..start]);
+        out.push_str(&rep);
+        out.extend(&chars[end..]);
+        out.push_str(eol);
+    }
+    if !hit_line {
+        return Err("文件里没有这一行，可能已经被改过了".into());
+    }
+    write_file(host, port, path, out, file.encoding).await?;
+    Ok(())
 }
 
 /// 快速打开（Ctrl+P）用的文件清单，返回相对工作区的路径
@@ -901,29 +1162,55 @@ pub async fn replace_all(
     query: String,
     replacement: String,
     max: usize,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    regex: Option<bool>,
+    preserve_case: Option<bool>,
+    include: Option<String>,
+    exclude: Option<String>,
+    only: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
     let max = max.clamp(1, 200);
+    let (ci, whole, is_re) = (!case_sensitive.unwrap_or(false), whole_word.unwrap_or(false), regex.unwrap_or(false));
+    let m = Matcher::new(&query, ci, whole, is_re)?;
+    let keep = preserve_case.unwrap_or(false);
+    let globs = Globs::new(include.as_deref().unwrap_or(""), exclude.as_deref().unwrap_or(""));
+    let only = only.unwrap_or_default();
     match host {
-        None => Ok(walk_replace(std::path::Path::new(&cwd), &query, &replacement, max)),
+        None => Ok(walk_replace(std::path::Path::new(&cwd), &m, &replacement, keep, &globs, &only, max)),
         Some(h) => {
             // 远端：先找命中文件，再逐个 base64 拉回来改完写回（最多 50 个，多了太慢）
+            let flags = if is_re { "-E" } else { "-F" };
+            let mut extra = String::new();
+            for g in include.as_deref().unwrap_or("").split([',', ';']).map(str::trim).filter(|x| !x.is_empty()) {
+                extra.push_str(&format!("--include={} ", shq(g)));
+            }
+            for g in exclude.as_deref().unwrap_or("").split([',', ';']).map(str::trim).filter(|x| !x.is_empty()) {
+                extra.push_str(&format!("--exclude={} ", shq(g)));
+            }
             let cmd = format!(
-                "cd {} && grep -rlI --binary-files=without-match --exclude-dir=.git -- {} . | head -50 | sed 's|^\\./||'",
+                "cd {} && grep -rlI {} {}{}--binary-files=without-match --exclude-dir=.git -- {} . | head -50 | sed 's|^\\./||'",
                 shq(&cwd),
+                flags,
+                if ci { "-i " } else { "" },
+                extra,
                 shq(&query)
             );
             let raw = ssh_exec(&h, port, &cmd)?;
             let mut changed = Vec::new();
             for rel in String::from_utf8_lossy(&raw).lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-                let abs = format!("{}/{}", cwd.trim_end_matches('/'), rel);
-                let file = read_file(Some(h.clone()), port, abs.clone(), None).await?;
-                if !file.content.contains(&query) {
+                if !only.is_empty() && !only.iter().any(|p| p == rel) {
                     continue;
                 }
-                let next = file.content.replace(&query, &replacement);
+                let abs = format!("{}/{}", cwd.trim_end_matches('/'), rel);
+                let file = read_file(Some(h.clone()), port, abs.clone(), None).await?;
+                let (next, n) = replace_text(&file.content, &m, &replacement, keep);
+                if n == 0 {
+                    continue;
+                }
                 write_file(Some(h.clone()), port, abs, next, file.encoding).await?;
                 changed.push(rel.to_string());
             }
@@ -939,27 +1226,46 @@ pub async fn search(
     cwd: String,
     query: String,
     max: usize,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    regex: Option<bool>,
+    include: Option<String>,
+    exclude: Option<String>,
 ) -> Result<Vec<SearchHit>, String> {
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
     let max = max.clamp(1, 500);
+    let (ci, whole, is_re) = (!case_sensitive.unwrap_or(false), whole_word.unwrap_or(false), regex.unwrap_or(false));
+    let m = Matcher::new(&query, ci, whole, is_re)?;
+    let globs = Globs::new(include.as_deref().unwrap_or(""), exclude.as_deref().unwrap_or(""));
     match host {
         None => {
             // 全仓扫描是纯 CPU + 阻塞 IO：直接跑在 async 里会占死一个 tokio worker，
             // 同时刻的 pty_write（终端输入）、stat_files（文件树轮询）都得排队
             tauri::async_runtime::spawn_blocking(move || {
                 let mut out = Vec::new();
-                walk_search(std::path::Path::new(&cwd), &query, max, &mut out);
+                walk_search(std::path::Path::new(&cwd), &m, &globs, max, &mut out);
                 out
             })
             .await
             .map_err(|e| e.to_string())
         }
         Some(h) => {
+            // 远端的 grep 也有同名开关，直接翻译过去
+            let flags = format!("-rnI {}{}{}", if ci { "-i " } else { "" }, if whole { "-w " } else { "" }, if is_re { "-E " } else { "-F " });
+            let mut extra = String::new();
+            for g in include.as_deref().unwrap_or("").split([',', ';']).map(str::trim).filter(|x| !x.is_empty()) {
+                extra.push_str(&format!("--include={} ", shq(g)));
+            }
+            for g in exclude.as_deref().unwrap_or("").split([',', ';']).map(str::trim).filter(|x| !x.is_empty()) {
+                extra.push_str(&format!("--exclude={} ", shq(g)));
+            }
             let cmd = format!(
-                "cd {} && grep -rnI --binary-files=without-match --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=__pycache__ --exclude-dir=.venv -m 30 -- {} . | head -{}",
+                "cd {} && grep {} {}--binary-files=without-match --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=__pycache__ --exclude-dir=.venv -m 30 -- {} . | head -{}",
                 shq(&cwd),
+                flags,
+                extra,
                 shq(&query),
                 max
             );
@@ -972,11 +1278,23 @@ pub async fn search(
                 let (Some(p), Some(n), Some(body)) = (it.next(), it.next(), it.next()) else { continue };
                 let Ok(lineno) = n.parse::<u32>() else { continue };
                 let rel = p.strip_prefix("./").unwrap_or(p);
+                let shown: String = body.trim_end().chars().take(200).collect();
+                // grep 只回一行文本，列号自己算（正则模式算不准，给 0，前端退回子串高亮）
+                let (col, len) = if is_re {
+                    (0, 0)
+                } else {
+                    m.find_all(&shown).first().copied().map(|(c, l)| (c as u32, l as u32)).unwrap_or((0, 0))
+                };
                 out.push(SearchHit {
                     path: format!("{}/{}", cwd.trim_end_matches('/'), rel),
                     line: lineno,
-                    text: body.trim().chars().take(200).collect(),
+                    col,
+                    len,
+                    text: shown,
                 });
+                if out.len() >= max {
+                    break;
+                }
             }
             Ok(out)
         }
@@ -1137,7 +1455,71 @@ mod tests {
 
 #[cfg(test)]
 mod perf_tests {
-    use super::{has_bytes, walk_repos};
+    use super::{has_bytes, match_case, replace_text, walk_repos, Globs, Matcher};
+
+    #[test]
+    fn matcher_case_word_regex() {
+        let hits = |m: &Matcher, line: &str| m.find_all(line);
+        // 大小写：ci 命中、区分大小写不命中
+        assert_eq!(hits(&Matcher::new("Foo", true, false, false).unwrap(), "a foo b").len(), 1);
+        assert!(hits(&Matcher::new("Foo", false, false, false).unwrap(), "a foo b").is_empty());
+        // 整词：foo 命中 (foo)、foo-bar，不命中 foobar / my_foo
+        let w = Matcher::new("foo", false, true, false).unwrap();
+        assert_eq!(hits(&w, "let foo = 1"), vec![(4, 3)]);
+        assert_eq!(hits(&w, "foo-bar").len(), 1);
+        assert!(hits(&w, "foobar").is_empty());
+        assert!(hits(&w, "my_foo").is_empty());
+        // 一行多处命中 / 正则
+        assert_eq!(hits(&Matcher::new("ab", false, false, false).unwrap(), "ab-ab"), vec![(0, 2), (3, 2)]);
+        let r = Matcher::new(r"fo+", false, false, true).unwrap();
+        assert_eq!(hits(&r, "ffoo"), vec![(1, 3)]); // fo+ 在 ff oo 里从第 2 个字符起
+        assert!(hits(&Matcher::new(r"fo+", false, true, true).unwrap(), "ffood").is_empty());
+        // 正则写错要报出来，别静默零结果
+        assert!(Matcher::new("a(", false, false, true).is_err());
+        assert!(hits(&Matcher::new("", false, false, false).unwrap(), "anything").is_empty());
+    }
+
+    #[test]
+    fn replace_honours_flags_and_preserve_case() {
+        let m = Matcher::new("foo", true, false, false).unwrap();
+        assert_eq!(replace_text("Foo foo
+bar
+", &m, "baz", false), ("baz baz
+bar
+".into(), 2));
+        // 保留大小写：全大写 / 首字母大写 / 全小写
+        assert_eq!(match_case("FOO", "bar"), "BAR");
+        assert_eq!(match_case("Foo", "bar"), "Bar");
+        assert_eq!(match_case("foo", "bar"), "bar");
+        assert_eq!(replace_text("FOO", &m, "quux", true).0, "QUUX");
+        // 整词 + 正则也照做
+        let w = Matcher::new("foo", false, true, false).unwrap();
+        assert_eq!(replace_text("foo foobar", &w, "x", false).0, "x foobar");
+        let r = Matcher::new(r"\d+", false, false, true).unwrap();
+        assert_eq!(replace_text("a1 b22", &r, "N", false).0, "aN bN");
+        // 没有命中就别动原文（含换行符原样）
+        let none = Matcher::new("zzz", false, false, false).unwrap();
+        assert_eq!(replace_text("keep
+me", &none, "x", false), ("keep
+me".into(), 0));
+    }
+
+    #[test]
+    fn include_exclude_globs() {
+        let g = Globs::new("*.ts", "");
+        assert!(g.allows("src/main.ts")); // 没写 / 的写法等于 **/*.ts
+        assert!(!g.allows("src/main.js"));
+        let g = Globs::new("src/**,*.md", "");
+        assert!(g.allows("src/a/b.rs"));
+        assert!(g.allows("README.md"));
+        assert!(!g.allows("target/x.rs"));
+        let g = Globs::new("", "**/node_modules/**,*.min.js");
+        assert!(!g.allows("a/node_modules/b/c.js"));
+        assert!(!g.allows("dist/app.min.js"));
+        assert!(g.allows("dist/app.js"));
+        // 两边都空 = 全放行
+        assert!(Globs::new("", "").allows("whatever.txt"));
+    }
 
     #[test]
     fn has_bytes_boundaries() {

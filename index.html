@@ -26,7 +26,6 @@
 
       <div id="ctxbar">
         <div id="ctx-tabs"></div>
-        <button id="ctx-new" title="打开文件夹（本机）">＋</button>
       </div>
 
       <div id="activity">
@@ -39,7 +38,6 @@
       <div id="sidebar">
         <div class="head" id="side-head">
           <span id="sidebar-title">资源管理器</span>
-          <button id="btn-open-folder" title="打开文件夹">＋</button>
         </div>
         <div id="tree"></div>
 
@@ -53,11 +51,46 @@
         </div>
 
         <div id="search-panel">
+          <div class="search-head">
+            <span>搜索</span>
+            <span class="spacer"></span>
+            <button id="se-fold" title="全部折叠">⊟</button>
+            <button id="se-refresh" title="重新搜索">⟳</button>
+            <button id="se-clear" title="清除搜索结果">✕</button>
+            <button id="se-more" title="包含/排除文件">⋯</button>
+          </div>
           <div class="search-box">
-            <input id="search-input" placeholder="搜索内容，回车（当前工作区）" />
-            <div class="replace-row">
-              <input id="replace-input" placeholder="替换为…（可留空）" />
+            <div class="se-row">
+              <button id="se-repl-toggle" title="显示/隐藏替换框">▾</button>
+              <div class="se-field">
+                <input id="search-input" placeholder="搜索" />
+                <span class="se-togs">
+                  <button id="se-case" class="se-tog" title="区分大小写">Aa</button>
+                  <button id="se-word" class="se-tog" title="全字匹配">ab</button>
+                  <button id="se-regex" class="se-tog" title="使用正则表达式">.*</button>
+                </span>
+              </div>
+            </div>
+            <div id="se-scope" class="se-scope hidden">
+              <span id="se-scope-text"></span>
+              <button id="se-scope-clear" title="在整个工作区里搜">✕</button>
+            </div>
+            <div id="se-replace" class="se-row se-indent">
+              <div class="se-field">
+                <input id="replace-input" placeholder="替换" />
+                <span class="se-togs">
+                  <button id="se-preserve" class="se-tog" title="保留大小写替换">AB</button>
+                </span>
+              </div>
               <button id="replace-all" title="把当前搜索内容全部替换掉">全部替换</button>
+            </div>
+            <div id="se-files" class="se-files hidden">
+              <div class="se-field">
+                <input id="se-include" placeholder="文件包含（如 *.ts,src/**）" />
+              </div>
+              <div class="se-field">
+                <input id="se-exclude" placeholder="文件排除（如 *.min.js,dist/**）" />
+              </div>
             </div>
           </div>
           <div id="search-list"></div>
@@ -108,6 +141,7 @@
         <span class="spacer"></span>
         <span id="st-enc" title="点击更换重新打开/保存用的编码"></span>
         <span id="st-md" title="Markdown 实时预览（Ctrl+Shift+V）">预览</span>
+        <span id="st-ws" title="用这个文件里的 folders / settings 打开工作区">打开工作区</span>
         <span id="st-eol" title="换行符"></span>
         <span id="st-conn">本地</span>
         <span id="st-pos"></span>

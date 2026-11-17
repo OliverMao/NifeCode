@@ -211,7 +211,12 @@ export class TerminalHost {
     el.append(head, termBody);
 
     // 新开终端时本页恢复等分（不然旧终端会一直占满、新终端被挤成 1px）
-    if (page.panes.length > 0) for (const p of page.panes) p.el.style.flex = "";
+    if (page.panes.length > 0) {
+      for (const p of page.panes) {
+        p.el.style.flex = "";
+        p.ratio = 1;
+      }
+    }
     page.el.appendChild(el);
 
     const term = new Terminal({
@@ -485,7 +490,7 @@ export class TerminalHost {
       sp.title = "拖动调整高度（双击恢复均分）";
       sp.innerHTML = `<i></i>`;
       sp.ondblclick = () => {
-        for (const x of page.panes) x.ratio = 1 / page.panes.length;
+        for (const x of page.panes) x.ratio = 1;
         this.relayout(page);
         this.fitPageBottom(page);
       };
@@ -532,16 +537,12 @@ export class TerminalHost {
       sp.classList.add("dragging");
       const move = (e: MouseEvent) => {
         const h = Math.max(60, Math.min(max, startH + (e.clientY - startY)));
-        above.el.style.flex = `0 0 ${Math.round(h)}px`;
-        above.ratio = h / avail;
-        // 下面的终端重新按剩余空间均分，别留着旧像素高度把最后一块挤没
+        // ratio 现在只是“相对权重”：上面这块用像素当权重，下面几块分剩下的，相对关系就对
+        above.ratio = h;
         const rest = page.panes.slice(page.panes.indexOf(above) + 1);
         const left = Math.max(60, avail - h) / rest.length;
-        for (const r of rest) {
-          r.ratio = left / avail;
-          r.el.style.flex = `0 0 ${Math.round(left)}px`;
-        }
-        rest[rest.length - 1].el.style.flex = "1 1 0";
+        for (const r of rest) r.ratio = left;
+        this.relayout(page);
       };
       const up = () => {
         window.removeEventListener("mousemove", move);
@@ -556,20 +557,16 @@ export class TerminalHost {
     });
   }
 
-  /** 关掉终端后重排：最后一个撑满，其余保持像素高度 */
+  /**
+   * 重排一页里的终端：用 flex-grow 按比例分，不把量出来的像素写死。
+   * （以前是 `0 0 Xpx`，页签刚建好/隐藏时量到的可用高度是错的，第一块就永久被压成几十像素）
+   */
   private relayout(page: Page) {
-    const n = page.panes.length;
-    if (!n) return;
-    const gap = (n - 1) * 8;
-    const avail = Math.max(120, page.el.getBoundingClientRect().height - gap);
-    page.panes.forEach((p, i) => {
-      if (i === n - 1) {
-        p.el.style.flex = "1 1 0"; // 最后一个吃掉剩下的，避免误差累积成滚动条
-        return;
-      }
-      if (p.ratio === undefined) p.ratio = 1 / n;
-      p.el.style.flex = `0 0 ${Math.max(60, Math.round(p.ratio * avail))}px`;
-    });
+    if (!page.panes.length) return;
+    for (const p of page.panes) {
+      if (!p.ratio || p.ratio <= 0) p.ratio = 1;
+      p.el.style.flex = `${p.ratio} 1 0`;
+    }
   }
 
   /** 窗口或终端列尺寸变了：按比例重算高度 */

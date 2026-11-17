@@ -49,11 +49,29 @@ interface Ctx {
   label: string;
   host: string | null;
   port: number;
-  root: string | null;
+  root: string | null;   // 主根：git / 搜索 / 终端 / 快速打开默认用它
+  roots?: RootEntry[];   // 多根工作区（一个 .code-workspace 里的几个 folders）；不填 = 只有 root
   online?: boolean;    // 只有 SSH 用：false = 从上次会话恢复出来的、还没连
   wantRoot?: string;   // 重连后要回的目录（不是 $HOME 的时候）
   gitRel?: string;     // 源代码管理盯着哪个仓库："" = 工作区根，否则是它下面的相对路径
   treeOpen?: Set<string>; // 这个项目上次展开了哪些文件夹（切标签回来/重连回来别又折起来）
+  ws?: CtxWs;          // 来自 .code-workspace 的工作区设置（见 openWorkspaceFile）
+}
+
+/** 一个工作区里的一个根目录（VS Code 的 folders[]）；name 是 folders[].name */
+interface RootEntry {
+  path: string;
+  name?: string;
+}
+
+/** 从 VS Code 的 .code-workspace 里只认我们用得上的几项 */
+interface CtxWs {
+  file?: string;               // 这个配置来自哪个 .code-workspace（标签悬停能看）
+  label?: string;              // folders[].name，没给就用文件夹名
+  minimap?: boolean;           // editor.minimap.enabled
+  wordWrap?: boolean;          // editor.wordWrap != "off"
+  unicodeHighlight?: boolean;  // editor.unicodeHighlight.ambiguousCharacters
+  filesExclude?: string[];     // files.exclude 里值为 true 的 glob（只在文件树里隐藏）
 }
 
 const CTX_KEY = "contexts";
@@ -71,6 +89,8 @@ function saveCtxs() {
     label: c.label,
     root: c.root,
     gitRel: c.gitRel,
+    ...(c.roots?.length ? { roots: c.roots } : {}),
+    ...(c.ws ? { ws: c.ws } : {}),
     ...(c.kind === "ssh" ? { host: c.host, port: c.port } : {}),
   }));
   ls.set(CTX_KEY, JSON.stringify({ locals: tabs, activeId }));
@@ -81,7 +101,7 @@ function restoreCtxs() {
     const raw = ls.get(CTX_KEY);
     if (!raw) return;
     const data = JSON.parse(raw) as {
-      locals?: { id: string; kind?: "local" | "ssh"; label: string; root: string | null; host?: string | null; port?: number; gitRel?: string }[];
+      locals?: { id: string; kind?: "local" | "ssh"; label: string; root: string | null; host?: string | null; port?: number; gitRel?: string; ws?: CtxWs; roots?: RootEntry[] }[];
       activeId?: string;
     };
     if (!data.locals?.length) return;
@@ -96,6 +116,8 @@ function restoreCtxs() {
         port: l.port ?? 22,
         root: l.root,
         gitRel: l.gitRel ?? "",
+        ws: l.ws,
+        roots: l.roots,
         online: isSsh ? false : undefined,
       });
     }
@@ -138,6 +160,39 @@ function curCtx(): Ctx {
   return contexts.find((c) => c.id === activeId) ?? contexts[0];
 }
 
+/** 这个标签下的根目录列表（普通打开的文件夹 = 一个根） */
+function ctxRoots(c: Ctx = curCtx()): RootEntry[] {
+  if (c.roots?.length) return c.roots;
+  return c.root ? [{ path: c.root }] : [];
+}
+
+/** 根在树里的显示名：folders[].name 优先，否则目录名 */
+function rootName(r: RootEntry): string {
+  return r.name || baseName(r.path) || r.path;
+}
+
+/** 这个路径属于哪个根（嵌套根时取最长匹配）；不属于任何根就 null */
+function rootOf(p: string): string | null {
+  const q = p.replace(/\\/g, "/");
+  let best: string | null = null;
+  for (const r of ctxRoots()) {
+    const b = r.path.replace(/[\\/]+$/, "");
+    if ((q === b || q.startsWith(`${b}/`)) && (!best || b.length > best.length)) best = b;
+  }
+  return best;
+}
+
+/** 多根时路径带上根名（`proj-b/README.md`），单根就是普通的相对路径 */
+function wsRelPath(p: string): string {
+  const b = rootOf(p);
+  if (!b) return relPath(p);
+  const rel = p === b ? "." : p.slice(b.length + 1);
+  const roots = ctxRoots();
+  if (roots.length <= 1) return rel;
+  const r = roots.find((x) => x.path.replace(/[\\/]+$/, "") === b);
+  return `${r ? rootName(r) : baseName(b)}/${rel}`;
+}
+
 // ---------- 长按项目标签拖出去 = 这个项目单开一个窗口 ----------
 let tearCtx: string | null = null; // 已长按、正在拖的那个
 let tearMoved = false; // 这次 pointerup 别当成普通点击
@@ -150,6 +205,15 @@ function tearReset() {
   }
   tearCtx = null;
   document.querySelectorAll(".ctx-tab.tearing").forEach((e) => e.classList.remove("tearing"));
+}
+
+/** 侧栏标题：当前标签是工作区（.code-workspace）时，资源管理器后面加个（工作区） */
+const PANEL_TITLES: Record<string, string> = { explorer: "资源管理器", search: "搜索", scm: "源代码管理", ssh: "SSH 连接" };
+let sideAct = "explorer";
+function renderSidebarTitle() {
+  const base = PANEL_TITLES[sideAct] ?? PANEL_TITLES.explorer;
+  $<HTMLSpanElement>("#sidebar-title").textContent =
+    sideAct === "explorer" && (curCtx().ws || ctxRoots().length > 1) ? `${base}（工作区）` : base;
 }
 
 // 一离开标签栏就拖出去（不依赖 pointerup：拖到窗口外面时收不到 pointerup）
@@ -177,7 +241,7 @@ async function tearOut(id: string) {
     setMsg(c.kind === "ssh" ? "还没连上，先点一下这个标签" : "这个标签还没打开文件夹");
     return;
   }
-  const payload = JSON.stringify({ kind: c.kind, label: c.label, root: r, host: c.host, port: c.port });
+  const payload = JSON.stringify({ kind: c.kind, label: c.label, root: r, host: c.host, port: c.port, ws: c.ws, roots: c.roots });
   const win = `w${Date.now()}`;
   try {
     await invoke("open_window", { id: win, title: `NifeCode — ${c.label}`, payload });
@@ -192,12 +256,17 @@ async function tearOut(id: string) {
 function renderCtxBar() {
   const bar = $("#ctx-tabs");
   bar.innerHTML = "";
+  renderSidebarTitle();
   for (const c of contexts) {
     const el = document.createElement("div");
     el.className = "ctx-tab" + (c.id === activeId ? " active" : "") + (c.online === false ? " offline" : "");
     const nm = document.createElement("span");
     nm.textContent = c.kind === "ssh" ? `SSH · ${c.label}` : c.label;
-    nm.title = c.root ?? "";
+    // 标签悬停能看这份工作区有哪几个根，以及配置来自哪个 .code-workspace
+    const rs = ctxRoots(c);
+    nm.title = [c.ws?.file ? `工作区配置：${c.ws.file}` : "", ...rs.map((r) => (rs.length > 1 ? `${rootName(r)}: ${r.path}` : r.path))]
+      .filter(Boolean)
+      .join("\n");
     el.appendChild(nm);
     const closable = c.kind === "ssh" || contexts.length > 1;
     if (closable) {
@@ -208,8 +277,7 @@ function renderCtxBar() {
       x.onclick = (e) => { e.stopPropagation(); void closeContext(c.id); };
       el.appendChild(x);
     }
-    el.onpointerdown = (ev) => {
-      if (ev.button !== 0) return;
+    el.onpointerdown = (ev) => {      if (ev.button !== 0) return;
       tearMoved = false;
       if (holdTimer !== undefined) clearTimeout(holdTimer);
       holdTimer = window.setTimeout(() => {
@@ -249,6 +317,7 @@ function switchContext(id: string) {
   if (!contexts.some((c) => c.id === id)) return;
   activeId = id;
   applyActive();
+  applyCtxSettings(curCtx()); // 每个工作区可以有自己的 minimap/换行配置
   void invoke("window_claim_root", { id: WIN, host, root: root ?? "", check: false }).catch(() => {});
   editor.setCtx(id);     // 编辑区跟着项目走：只看这个项目打开的文件
   renderTabs();
@@ -400,6 +469,8 @@ function renderStatusInfo() {
   const md = $<HTMLSpanElement>("#st-md");
   md.style.display = isMarkdown(d?.path) ? "" : "none";
   md.classList.toggle("on", !!mdPreview);
+  // .code-workspace 当文本打开时，状态栏给一个「打开工作区」（CSS 里默认 display:none，所以这里要写回 inline）
+  $<HTMLSpanElement>("#st-ws").style.display = isWsFile(d?.path ?? "") ? "inline" : "none";
   // 标签栏右边那个「预览」按钮：只对 .md 出现（状态栏那个位置太不起眼）
   const mdTab = $<HTMLButtonElement>("#tab-md");
   mdTab.classList.toggle("show", isMarkdown(d?.path));
@@ -696,10 +767,16 @@ function loadSettings(): Settings {
 const settings = loadSettings();
 
 function applyEditorSettings() {
-  editor.setMinimap(settings.minimap);
-  editor.setWordWrap(settings.wordWrap);
-  editor.setUnicodeHighlight(settings.unicodeHighlight);
   editor.setStripAnsi(settings.stripAnsi);
+  applyCtxSettings();
+}
+
+/** 当前工作区生效的编辑器选项：.code-workspace 里配了就听它的，没配用全局设置 */
+function applyCtxSettings(c = curCtx()) {
+  const w = c.ws ?? {};
+  editor.setMinimap(w.minimap ?? settings.minimap);
+  editor.setWordWrap(w.wordWrap ?? settings.wordWrap);
+  editor.setUnicodeHighlight(w.unicodeHighlight ?? settings.unicodeHighlight);
 }
 
 async function showSettings() {
@@ -806,17 +883,17 @@ async function showSettings() {
   on<HTMLInputElement>("set-minimap")?.addEventListener("change", (e) => {
     settings.minimap = (e.target as HTMLInputElement).checked;
     save("minimap", settings.minimap ? "1" : "0");
-    editor.setMinimap(settings.minimap);
+    applyCtxSettings();
   });
   on<HTMLInputElement>("set-wrap")?.addEventListener("change", (e) => {
     settings.wordWrap = (e.target as HTMLInputElement).checked;
     save("editor-wrap", settings.wordWrap ? "1" : "0");
-    editor.setWordWrap(settings.wordWrap);
+    applyCtxSettings();
   });
   on<HTMLInputElement>("set-unicode")?.addEventListener("change", (e) => {
     settings.unicodeHighlight = (e.target as HTMLInputElement).checked;
     save("unicode-highlight", settings.unicodeHighlight ? "1" : "0");
-    editor.setUnicodeHighlight(settings.unicodeHighlight);
+    applyCtxSettings();
   });
   on<HTMLInputElement>("set-ansi")?.addEventListener("change", (e) => {
     settings.stripAnsi = (e.target as HTMLInputElement).checked;
@@ -920,11 +997,20 @@ editor.onDocChange(() => syncMdPreview());
 // ---------- 标签页 ----------
 
 // ---------- 文件夹选择器（本机 / 远端共用，不走系统对话框：有些机器弹资源管理器很卡）----------
-async function pickFolder(start?: string, conn = connArg()): Promise<string | null> {
+interface PickOpts {
+  pick?: "none" | "ws" | "file"; // 列表里能选什么（默认只能选目录，顺带列 .code-workspace）
+  okText?: string;                 // 确定按钮文案（比如「添加到工作区」）
+  title?: string;
+}
+
+/** 文件夹选择器（本机 / 远端共用）；pick 决定列表里能不能选文件（VS Code 的「打开文件/打开工作区」也要用它） */
+async function pickFolder(start?: string, conn = connArg(), opts: PickOpts = {}): Promise<string | null> {
+  const pick = opts.pick ?? "none";
   // 本机没打开工作区时先落到用户目录：Windows 的 "/" 是当前盘根，拿去当工作区很奇怪
   const from = start || (conn.host ? "/" : (await invoke<string | null>("home_dir").catch(() => null)) ?? "/");
   const m = $("#modal");
-  m.querySelector(".title")!.textContent = conn.host ? "打开远端文件夹" : "打开文件夹";
+  m.querySelector(".title")!.textContent =
+    opts.title ?? (pick === "file" ? "打开文件" : pick === "ws" ? "打开工作区文件" : conn.host ? "打开远端文件夹" : "打开文件夹");
   const body = m.querySelector(".body") as HTMLDivElement;
   const acts = m.querySelector(".actions") as HTMLDivElement;
   body.style.whiteSpace = "normal";
@@ -941,12 +1027,13 @@ async function pickFolder(start?: string, conn = connArg()): Promise<string | nu
   const list = body.querySelector("#pk-list") as HTMLDivElement;
   let cur = from;
 
-  const addRow = (label: string, onPick: () => void, isDir: boolean) => {
+  const addRow = (label: string, onPick: () => void, kind: "up" | "dir" | "ws" | "file") => {
     const row = document.createElement("div");
     row.className = "pk-row";
     const ico = document.createElement("span");
     ico.className = "ico";
-    if (isDir) ico.innerHTML = iconSvg(iconFor(label, true, false));
+    if (kind === "dir") ico.innerHTML = iconSvg(iconFor(label, true, false));
+    else if (kind === "ws" || kind === "file") ico.innerHTML = iconSvg(iconFor(label, false, false));
     else ico.textContent = "↰";
     const name = document.createElement("span");
     name.className = "name";
@@ -955,6 +1042,10 @@ async function pickFolder(start?: string, conn = connArg()): Promise<string | nu
     row.onclick = onPick;
     list.appendChild(row);
   };
+
+  // .code-workspace / 普通文件是文件不是文件夹，但得能在这里选中，所以上面列表里跟目录一起列；
+  // 选中的回调在 Promise 里才拿得到（done），先用一个变量接一下
+  let pickPath: (p: string) => void = () => {};
 
   const go = async (path: string) => {
     cur = path;
@@ -969,10 +1060,14 @@ async function pickFolder(start?: string, conn = connArg()): Promise<string | nu
     }
     list.innerHTML = "";
     const parent = parentDir(path);
-    if (parent && parent !== path) addRow("..", () => void go(parent), false);
+    if (parent && parent !== path) addRow("..", () => void go(parent), "up");
+    const filesIn = (pred: (n: string) => boolean) => entries.filter((e) => !e.is_dir && pred(e.name)).sort((a, b) => a.name.localeCompare(b.name));
     const dirs = entries.filter((e) => e.is_dir).sort((a, b) => a.name.localeCompare(b.name));
-    if (dirs.length === 0) list.innerHTML = `<div class="pk-empty">（没有子文件夹）</div>`;
-    for (const d of dirs) addRow(d.name, () => void go(d.path), true);
+    // pick=none：只把 .code-workspace 当快速入口（常规文件夹选择顺带支持）；pick=ws：只列工作区；pick=file：列所有文件
+    const files = pick === "file" ? filesIn(() => true) : filesIn((n) => isWsFile(n));
+    if (dirs.length === 0 && files.length === 0) list.innerHTML = `<div class="pk-empty">（没有子文件夹）</div>`;
+    for (const d of dirs) addRow(d.name, () => void go(d.path), "dir");
+    for (const f of files) addRow(pick === "file" ? f.name : `${f.name}（工作区）`, () => pickPath(f.path), pick === "file" ? "file" : "ws");
   };
 
   return new Promise<string | null>((resolve) => {
@@ -982,8 +1077,9 @@ async function pickFolder(start?: string, conn = connArg()): Promise<string | nu
       m.onclick = null;
       resolve(v);
     };
+    pickPath = (p) => done(p);
     const ok = document.createElement("button");
-    ok.textContent = "打开";
+    ok.textContent = opts.okText ?? (pick === "none" ? "打开" : "选这个文件夹");
     const cancel = document.createElement("button");
     cancel.textContent = "取消";
     cancel.className = "secondary";
@@ -1109,15 +1205,33 @@ function closeGone(paths: string[]) {
   renderTabs();
 }
 
-/** 左上角主菜单（点 logo / 品牌名出来） */
+/** 左上角唯一的菜单（点 logo 出来）：打开/新建/加文件夹/设置/关于都在这儿 */
 function mainMenu(): MenuItem[] {
+  const dir = pasteTarget();
   return [
-    // 终端栏收起以后入口不好找，主菜单里单列一条（文案跟着当前状态走）
-    { label: $("#term-col").classList.contains("collapsed") ? "显示终端" : "隐藏终端", run: () => toggleTerm() },
+    { label: "新建文件…", run: () => { if (dir) void newEntry(dir, false); } },
+    { label: "新建文件夹…", run: () => { if (dir) void newEntry(dir, true); } },
     "sep",
+    { label: "打开文件…", run: () => void openFileDialog() },
+    { label: "打开文件夹…", run: () => void openFolderDialog() },
+    { label: "打开工作区文件…", run: () => void openWorkspaceDialog() },
+    { label: "将文件夹添加到工作区…", run: () => void addFolderToWorkspace() },
+    "sep",
+    { label: "保存", run: () => void saveCurrent() },
+    { label: "全部保存", run: () => void saveAll() },
+    "sep",
+    // VS Code 的位置：保存/另存为之后就是工作区那两个（单文件夹也能「另存为工作区」）
+    ...(ctxRoots().length
+      ? ([
+          ...(curCtx().ws?.file ? [{ label: "保存工作区", run: () => void saveWorkspace() } as MenuItem] : []),
+          { label: "将工作区另存为…", run: () => void saveWorkspaceAs() } as MenuItem,
+        ])
+      : []),
+    "sep",
+    { label: "关闭文件夹", run: () => closeFolder() },
     { label: "设置…", run: () => void showSettings() },
-    { label: "关于 NifeCode", run: () => void showAbout() },
     "sep",
+    { label: "关于 NifeCode", run: () => void showAbout() },
     { label: "退出", run: () => void getCurrentWindow().close() },
   ];
 }
@@ -1271,7 +1385,7 @@ function renderTabs(activePath?: string) {
     name.textContent = baseName(p);
     name.style.overflow = "hidden";
     name.style.textOverflow = "ellipsis";
-    bindTip(el, name, () => relPath(p), true);
+    bindTip(el, name, () => wsRelPath(p), true);
     const x = document.createElement("span");
     x.className = "x";
     x.textContent = "✕";
@@ -1874,7 +1988,10 @@ function treeMenu(e: Entry, paths: string[]): MenuItem[] {
   items.push("sep");
   if (multi) items.push({ label: `${paths.length} 项已选择`, run: () => {} });
   else if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
-  else items.push({ label: "在此打开工作区", run: () => void openRoot(e.path) });
+  else items.push(
+    { label: "在此打开工作区", run: () => void openRoot(e.path) },
+    { label: "在文件夹中搜索…", run: () => searchInFolder(e.path) }
+  );
   items.push(
     { label: multi ? `复制 ${paths.length} 个路径` : "复制绝对路径", run: () => copyText(paths.join("\n")) },
     ...(multi ? [] : [{ label: "复制相对路径", run: () => copyText(relPath(e.path)) } as MenuItem]),
@@ -1906,12 +2023,13 @@ async function copyText(text: string) {
 
 /** 相对工作区根目录的路径 */
 function relPath(p: string): string {
-  if (!root) return p;
+  const r = rootOf(p) ?? root;
+  if (!r) return p;
   const norm = (s: string) => s.replace(/[\\/]+/g, "/").replace(/\/$/, "");
-  const r = norm(root);
+  const b = norm(r);
   const q = norm(p);
-  if (q === r) return ".";
-  return q.startsWith(`${r}/`) ? q.slice(r.length + 1) : q;
+  if (q === b) return ".";
+  return q.startsWith(`${b}/`) ? q.slice(b.length + 1) : q;
 }
 
 function setClip(paths: string[], cut: boolean) {
@@ -2060,9 +2178,10 @@ let treeSig = "";
 let treeGen = 0;
 
 async function revealInTree(path?: string) {
-  if (!path || !root || path === lastReveal) return;
+  const b0 = path ? rootOf(path) : null;
+  if (!path || !b0 || path === lastReveal) return;
   if ($("#tree").classList.contains("hidden")) return; // 左侧不是资源管理器，别在后台白跑 ssh
-  const base = root.replace(/[\\/]+$/, "");
+  const base = b0.replace(/[\\/]+$/, "");
   const norm = path.replace(/\\/g, "/");
   if (!norm.startsWith(`${base}/`)) return; // 不在当前工作区里（比如从别的工作区恢复的标签）
   lastReveal = path;
@@ -2083,13 +2202,66 @@ async function revealInTree(path?: string) {
 }
 
 async function refreshTree() {
-  if (!root) return;
+  const roots = ctxRoots();
+  if (!roots.length) return;
   const gen = ++treeGen;
   // 先画到离线节点上，画完再整体换掉 #tree。
   // 远端一次 read_dir 要跑一趟 ssh，删除后的刷新很容易和定时轮询撞在一起，
   // 之前是先清空再异步追加，两次刷新会各追加一遍 —— 列表就重复显示了一份。
   const box = document.createElement("div");
-  await renderTree(root, box, 0, true);
+  if (roots.length === 1) {
+    // 单根：和以前一样，根下的内容直接铺在顶层（VS Code 也这样）
+    await renderTree(roots[0].path, box, 0, true);
+  } else {
+    // 多根：每个根一行标题（folders[].name 优先），下面缩一级铺它的内容 —— 和 VS Code 一样
+    for (const r of roots) {
+      const head = document.createElement("div");
+      head.className = "node root";
+      head.dataset.path = r.path;
+      head.dataset.dir = "1";
+      head.style.paddingLeft = "8px";
+      const ico = document.createElement("span");
+      ico.className = "ico";
+      paintIcon(ico, rootName(r), true, r.path);
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = rootName(r);
+      head.append(ico, name);
+      bindTip(head, name, () => r.path);
+      head.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        sel.clear();
+        sel.add(r.path);
+        selAnchor = r.path;
+        paintSel();
+        const items: MenuItem[] = roots.length > 1 ? [{ label: "从工作区移除", run: () => void removeRootFromWorkspace(r.path) }, "sep"] : [];
+        items.push(...treeMenu({ name: rootName(r), path: r.path, is_dir: true }, picked(r.path)));
+        showMenu(ev.clientX, ev.clientY, items);
+      };
+      head.onclick = async () => {
+        treeFocus = true;
+        if (expanded.has(r.path)) {
+          expanded.delete(r.path);
+          head.nextElementSibling?.remove();
+        } else {
+          expanded.add(r.path);
+          const sub = document.createElement("div");
+          head.after(sub);
+          await renderTree(r.path, sub, 1, true);
+          paintGit();
+        }
+        paintIcon(ico, rootName(r), true, r.path);
+        void pollTree(true);
+      };
+      box.appendChild(head);
+      if (expanded.has(r.path)) {
+        const sub = document.createElement("div");
+        box.appendChild(sub);
+        await renderTree(r.path, sub, 1, true);
+      }
+    }
+  }
   if (gen !== treeGen) return; // 期间又发起了一次刷新，这次的结果丢掉
   $("#tree").replaceChildren(...box.children);
   paintSel(); // 重建行以后把多选高亮补回来
@@ -2099,9 +2271,10 @@ async function refreshTree() {
 
 /** 只 stat 一次，变了就重画：本地 1.5s / 远端 5s 一次 */
 async function pollTree(reset = false) {
-  if (!root) return;
+  const roots = ctxRoots();
+  if (!roots.length) return;
   if (reset) treeSig = "";
-  const dirs = [root, ...expanded].slice(0, 40);
+  const dirs = [...roots.map((r) => r.path), ...expanded].slice(0, 40);
   let mtimes: number[];
   try {
     mtimes = await invoke<number[]>("stat_files", { ...connArg(), paths: dirs });
@@ -2116,6 +2289,52 @@ async function pollTree(reset = false) {
   if (sig !== treeSig) await refreshTree();
 }
 
+/**
+ * files.exclude：VS Code 那套 glob（`**` 跨目录、`*` 不跨）→ 正则，只看工作区相对路径。
+ * 只在文件树里隐藏，git 面板/搜索照旧（VS Code 那边是 search.exclude 管搜索）。
+ */
+function globToRe(pat: string): RegExp {
+  let out = "";
+  for (let i = 0; i < pat.length; i++) {
+    const ch = pat[i];
+    if (ch === "*") {
+      if (pat[i + 1] === "*") {
+        i++;
+        if (pat[i + 1] === "/") {
+          i++;
+          out += "(?:.*/)?"; // `**/x` 连根上的 x 也算
+        } else out += ".*";
+      } else out += "[^/]*";
+    } else if (ch === "?") out += "[^/]";
+    else out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^/?${out}$`);
+}
+
+let excludeCache: { key: string; re: RegExp[] } = { key: "", re: [] };
+
+function excluded(path: string): boolean {
+  const pats = curCtx().ws?.filesExclude;
+  if (!pats?.length) return false;
+  const key = pats.join("\u0000");
+  if (excludeCache.key !== key) excludeCache = { key, re: pats.map(globToRe) };
+  // 多根工作区：相对路径按它自己那个根算
+  const base = rootOf(path) ?? root;
+  if (!base) return false;
+  const rel = path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path;
+  const re = excludeCache.re;
+  if (re.some((r) => r.test(rel))) return true;
+  // 父目录被排除掉，里面的文件也不该出来（Ctrl+P 的清单是平的，路径上没有“目录行”）
+  const parts = rel.split("/");
+  for (let i = 1; i < parts.length; i++) if (re.some((r) => r.test(parts.slice(0, i).join("/")))) return true;
+  return false;
+}
+
+/** 批量版：给 Ctrl+P 的文件清单用 */
+function excludedList(paths: string[]): string[] {
+  return curCtx().ws?.filesExclude?.length ? paths.filter((p) => !excluded(p)) : paths;
+}
+
 async function renderTree(dir: string, container: HTMLElement, depth: number, silent = false) {
   let entries: Entry[];
   try {
@@ -2127,6 +2346,7 @@ async function renderTree(dir: string, container: HTMLElement, depth: number, si
   const wrap = document.createElement("div");
   const subs: [string, HTMLElement][] = []; // 已展开的子目录，画完本级后并行拉取
   for (const e of entries) {
+    if (excluded(e.path)) continue; // files.exclude
     const row = document.createElement("div");
     row.className = "node";
     row.dataset.path = e.path;
@@ -2226,15 +2446,21 @@ async function claimRoot(next?: string): Promise<boolean> {
   return !other;
 }
 
-async function openRoot(path: string) {
+async function openRoot(path: string, ws?: CtxWs) {
   // 统一成正斜杠：右键菜单/命令行/手输都可能给反斜杠，混着会导致树里路径和标签路径对不上
   path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  if (isWsFile(path)) { await openWorkspaceFile(path); return; }
   // 同一个文件夹已经开在本窗口的另一个标签里：切过去，别再开一份
   // （两份缓冲各改各的，保存时互相覆盖，看起来就像“改了又变回去”）
   const self = curCtx();
-  const dup = contexts.find((x) => x.id !== self.id && x.host === self.host && x.root === path);
+  const dup = contexts.find((x) => x.id !== self.id && x.host === self.host && ctxRoots(x).some((r) => r.path === path));
   if (dup) {
     switchContext(dup.id);
+    if (ws) {
+      // 同一个文件夹被工作区文件点到：把工作区配置盖到已经开着的那个标签上
+      dup.ws = ws;
+      applyCtxSettings(dup);
+    }
     setMsg(`这个文件夹已经开在「${dup.label}」标签里`);
     return;
   }
@@ -2242,25 +2468,325 @@ async function openRoot(path: string) {
     setMsg("这个项目已经在另一个窗口打开了，已经切过去");
     return;
   }
-  root = path;
   const c = curCtx();
-  if (c.root !== path) c.treeOpen = undefined; // 换了工作区，旧的展开记录作废
-  c.root = path;
-  if (c.kind === "local" && baseName(path)) {
-    c.label = baseName(path);
-    renderCtxBar();
-  }
+  const label = ws?.label ?? (c.kind === "local" ? baseName(path) : c.label);
+  await applyRoots(c, [{ path }], label, ws);
+}
+
+/**
+ * 把一套根目录挂到一个标签上：普通打开文件夹 = 一个根，.code-workspace = 多个根。
+ * 多根也是一个标签（和 VS Code 一样：标签就是工作区，根在资源管理器里分节）。
+ */
+async function applyRoots(c: Ctx, roots: RootEntry[], label: string, ws?: CtxWs, keepTree = false) {
+  root = roots[0].path; // 主根：git / 搜索 / 终端 / 快速打开默认用它
+  c.roots = roots;
+  c.ws = ws;
+  if (c.root !== roots[0].path) c.treeOpen = undefined; // 换了工作区，旧的展开记录作废
+  c.root = roots[0].path;
+  c.gitRel = ""; // 源代码管理回到新工作区的根（旧仓库相对路径已无效）
+  if (label && c.label !== label) c.label = label;
   saveCtxs();
-  expanded.clear();
-  for (const p of c.treeOpen ?? []) expanded.add(p); // 重连回来 / 换文件夹后恢复展开状态
+  renderCtxBar();
+  if (!keepTree) {
+    expanded.clear();
+    for (const p of c.treeOpen ?? []) expanded.add(p); // 重连回来 / 换文件夹后恢复展开状态
+  }
+  for (const r of roots) expanded.add(r.path); // 每个根默认展开（VS Code 也是全展开）
   clearSel();
   $("#tree").innerHTML = "";
   await refreshTree();
   // 终端 cwd 跟随工作区（cwd 是回调，不用重建），首次打开顺手起一个；
   // 但终端栏是收着的就别自己弹出来（连 SSH 时也会走到这里）
   if (terms.count() === 0 && !$("#term-col").classList.contains("collapsed")) void terms.newTerminal();
-  setMsg(path);
+  applyCtxSettings();
+  setMsg(roots.length > 1 ? `${label}：${roots.length} 个文件夹` : roots[0].path);
   void loadGit();
+}
+
+/** 文件 → 打开文件夹…（当前标签已经有工作区就新开一个标签，和 ＋ 一样） */
+async function openFolderDialog() {
+  const dir = await pickFolder(root ?? undefined);
+  if (!dir) return;
+  if (isWsFile(dir)) return void openRoot(dir); // 在文件夹选择器里点到了 .code-workspace
+  const c = curCtx();
+  if (ctxRoots(c).length) {
+    const nc = newLocalContext();
+    switchContext(nc.id);
+  }
+  await openRoot(dir);
+}
+
+/** 文件 → 打开文件…（VS Code 的 Ctrl+O）；选到 .code-workspace 就当工作区开 */
+async function openFileDialog() {
+  const p = await pickFolder(root ?? undefined, connArg(), { pick: "file" });
+  if (!p) return;
+  if (isWsFile(p)) await openRoot(p);
+  else await openFile(p);
+}
+
+/** 文件 → 打开工作区文件… */
+async function openWorkspaceDialog() {
+  const p = await pickFolder(root ?? undefined, connArg(), { pick: "ws" });
+  if (p) await openRoot(p);
+}
+
+/** 文件 → 将文件夹添加到工作区…（VS Code 的 Add Folder to Workspace） */
+async function addFolderToWorkspace() {
+  if (!ctxRoots().length) return void openFolderDialog(); // 还没工作区：先当一个普通文件夹打开
+  const dir = await pickFolder(root ?? undefined, connArg(), { okText: "添加到工作区", title: "将文件夹添加到工作区" });
+  if (!dir) return;
+  if (isWsFile(dir)) return void openRoot(dir);
+  const c = curCtx();
+  if (ctxRoots(c).some((r) => r.path === dir)) {
+    setMsg("这个文件夹已经在当前工作区里了");
+    return;
+  }
+  // 普通文件夹加第二个根 = 变成（未命名）工作区，和 VS Code 一样；本来就是工作区的保留原配置
+  await applyRoots(c, [...ctxRoots(c), { path: dir }], c.label, c.ws ?? {}, true);
+  setMsg(`已添加文件夹：${dir}（这个标签现在是一个工作区）`);
+}
+
+/** 一个路径相对另一个目录的写法（写工作区文件时用，跨盘/不在下面就直接给绝对路径） */
+function relTo(base: string, p: string): string {
+  const norm = (s: string) => s.replace(/[\\/]+/g, "/").replace(/\/$/, "");
+  const b = norm(base);
+  const q = norm(p);
+  if (q === b) return ".";
+  return q.startsWith(`${b}/`) ? q.slice(b.length + 1) : q;
+}
+
+/**
+ * 把当前标签写成 VS Code 的 .code-workspace（name / folders / settings 里我们认识的那几项）。
+ * 文件已存在就先读出来合并：不认识的键（extensions、别的 settings）原样留着。
+ */
+async function saveWorkspace(file?: string) {
+  const c = curCtx();
+  const roots = ctxRoots(c);
+  if (!roots.length) {
+    setMsg("当前没有打开文件夹");
+    return;
+  }
+  const target = file ?? c.ws?.file;
+  if (!target) return saveWorkspaceAs();
+  // 先读旧内容（不存在就当空的）
+  let obj: Record<string, unknown> = {};
+  try {
+    const res = await invoke<ReadFile>("read_file", { host: c.host, port: c.port, path: target });
+    obj = parseJsonc(res.content) as Record<string, unknown>;
+  } catch { /* 新文件 */ }
+  const dir = parentOf(target);
+  obj.name = c.label;
+  obj.folders = roots.map((r) => ({ path: relTo(dir, r.path), ...(r.name ? { name: r.name } : {}) }));
+  const ws = c.ws ?? {};
+  const set = (obj.settings as Record<string, unknown>) ?? {};
+  if (ws.minimap !== undefined) set["editor.minimap.enabled"] = ws.minimap;
+  if (ws.wordWrap !== undefined) set["editor.wordWrap"] = ws.wordWrap ? "on" : "off";
+  if (ws.unicodeHighlight !== undefined) set["editor.unicodeHighlight.ambiguousCharacters"] = ws.unicodeHighlight;
+  if (ws.filesExclude?.length) {
+    const ex = { ...((set["files.exclude"] as Record<string, unknown>) ?? {}) };
+    for (const p of ws.filesExclude) ex[p] = true;
+    set["files.exclude"] = ex;
+  }
+  if (Object.keys(set).length) obj.settings = set;
+  try {
+    await invoke("write_file", {
+      host: c.host,
+      port: c.port,
+      path: target,
+      content: `${JSON.stringify(obj, null, 2)}\n`,
+      encoding: "utf-8",
+    });
+  } catch (e) {
+    setMsg(`保存工作区失败：${String(e).slice(0, 140)}`);
+    return;
+  }
+  c.ws = { ...ws, file: target }; // 从现在起这个标签跟这份文件绑定
+  saveCtxs();
+  renderCtxBar();
+  fileCache = null;
+  setMsg(`已保存工作区：${target}`);
+}
+
+/** 文件 → 将工作区另存为…（选目录 + 文件名，默认叫 标签名.code-workspace） */
+async function saveWorkspaceAs() {
+  const c = curCtx();
+  if (!ctxRoots(c).length) {
+    setMsg("当前没有打开文件夹");
+    return;
+  }
+  const dir = await pickFolder(root ?? undefined, connArg(), { okText: "保存到这里", title: "将工作区另存为（选择保存位置）" });
+  if (!dir) return;
+  const name = await askText("将工作区另存为", "文件名", `${c.label || "workspace"}.code-workspace`);
+  if (!name) return;
+  const fileName = isWsFile(name) ? name : `${name}.code-workspace`;
+  await saveWorkspace(joinPath(dir, fileName));
+}
+
+/** 从工作区移除一个文件夹（右键根节点）；只剩一个时退化成普通文件夹 */
+async function removeRootFromWorkspace(p: string) {
+  const c = curCtx();
+  const rest = ctxRoots(c).filter((r) => r.path !== p);
+  if (!rest.length) {
+    closeFolder();
+    return;
+  }
+  await applyRoots(c, rest, c.label, c.ws ?? {}, true);
+  setMsg(`已从工作区移除：${p}`);
+}
+
+/** 文件 → 关闭文件夹：清空这个标签的根（窗口和已打开的文件都保留，脏文件不会被丢） */
+function closeFolder() {
+  const c = curCtx();
+  if (!ctxRoots(c).length) {
+    setMsg("当前没有打开文件夹");
+    return;
+  }
+  root = null;
+  c.root = null;
+  c.roots = undefined;
+  c.ws = undefined;
+  c.gitRel = "";
+  c.treeOpen = undefined;
+  if (c.kind === "local") c.label = "本机";
+  expanded.clear();
+  clearSel();
+  $("#tree").innerHTML = "";
+  treeSig = "";
+  saveCtxs();
+  renderCtxBar();
+  renderGit(null);
+  applyCtxSettings();
+  setMsg("已关闭文件夹");
+}
+
+async function saveAll() {
+  const paths = editor.dirtyPaths();
+  if (!paths.length) {
+    setMsg("没有要保存的文件");
+    return;
+  }
+  let bad = 0;
+  for (const p of paths) {
+    try {
+      await savePath(p);
+    } catch {
+      bad++;
+    }
+  }
+  renderTabs(editor.current()?.path);
+  setMsg(bad ? `保存完成，${bad} 个失败` : `已保存 ${paths.length} 个文件`);
+}
+
+/** VS Code 的工作区文件（.code-workspace） */
+function isWsFile(p: string): boolean {
+  return /\.code-workspace$/i.test(p);
+}
+
+/** 工作区文件是 JSONC（允许注释、尾逗号）：先按原文 parse，不行就剔注释再试 */
+function parseJsonc(text: string): Record<string, unknown> {
+  const raw = text.replace(/^\uFEFF/, "");
+  try {
+    return JSON.parse(raw);
+  } catch { /* 走下面那趟 */ }
+  let out = "";
+  let str = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (str) {
+      out += ch;
+      if (ch === "\\") out += raw[++i] ?? "";
+      else if (ch === '"') str = false;
+    } else if (ch === '"') {
+      str = true;
+      out += ch;
+    } else if (ch === "/" && raw[i + 1] === "/") {
+      while (i < raw.length && raw[i] !== "\n") i++;
+      out += "\n";
+    } else if (ch === "/" && raw[i + 1] === "*") {
+      i += 2;
+      while (i < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+      i++;
+    } else if (ch === "}" || ch === "]") {
+      out = out.replace(/,\s*$/, ""); // 尾逗号：只在结构符这里脱（字符串里的 ",}" 不碰）
+      out += ch;
+    } else {
+      out += ch;
+    }
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * 打开 .code-workspace：folders 有几个就开几个标签（VS Code 是 multi-root 单窗口，
+ * 这里一个根一个标签），settings 里只认 minimap / wordWrap / unicodeHighlight / files.exclude。
+ */
+async function openWorkspaceFile(file: string) {
+  const c0 = curCtx();
+  let ws: { name?: string; folders?: { path?: string; name?: string }[]; settings?: Record<string, unknown> };
+  try {
+    const res = await invoke<ReadFile>("read_file", { host: c0.host, port: c0.port, path: file });
+    ws = parseJsonc(res.content) as typeof ws;
+  } catch (e) {
+    setMsg(`工作区文件读不出来：${String(e).slice(0, 120)}`);
+    return;
+  }
+  const dir = parentOf(file);
+  const list: { path: string; name?: string }[] = [];
+  let skipped = 0;
+  for (const f of ws.folders ?? []) {
+    // VS Code 本地文件夹写 path；写成 file:// URI 的也能认，其它协议（vscode-remote://）暂不支持，但不默默吞掉
+    const uri = (f as { uri?: string } | undefined)?.uri;
+    const p = f?.path ?? (typeof uri === "string" && uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)).replace(/^\/([A-Za-z]:)/, "$1") : undefined);
+    if (!p) {
+      skipped++;
+      continue;
+    }
+    list.push({ path: /^[A-Za-z]:[\\/]|^\//.test(p) ? cleanPath(p) : joinPath(dir, p), name: f.name });
+  }
+  if (!list.length) {
+    setMsg(skipped ? "这个工作区文件的 folders 只有 uri（远程工作区），暂时支持不了" : "这个工作区文件里没有 folders（VS Code 的 folders 数组是空的）");
+    return;
+  }
+  const raw = (ws.settings ?? {}) as Record<string, unknown>;
+  const wrap = raw["editor.wordWrap"];
+  // files.exclude 是个 { glob: boolean }：true = 隐藏，false = 显式不隐
+  const ex = raw["files.exclude"];
+  const st: CtxWs = {
+    file,
+    minimap: typeof raw["editor.minimap.enabled"] === "boolean" ? (raw["editor.minimap.enabled"] as boolean) : undefined,
+    wordWrap: typeof wrap === "string" ? wrap !== "off" : undefined,
+    unicodeHighlight:
+      typeof raw["editor.unicodeHighlight.ambiguousCharacters"] === "boolean"
+        ? (raw["editor.unicodeHighlight.ambiguousCharacters"] as boolean)
+        : undefined,
+    filesExclude:
+      ex && typeof ex === "object" ? Object.entries(ex as Record<string, unknown>).filter(([, v]) => v === true).map(([k]) => k) : undefined,
+  };
+  // 标签就是工作区：多根也是同一个标签（和 VS Code 一样），名字用工作区的 name
+  const label = (ws.name ?? "").trim() || baseName(file).replace(/\.code-workspace$/i, "");
+  const key = (rs: RootEntry[]) => rs.map((r) => r.path).sort().join("\u0000");
+  const same = contexts.find((x) => x.host === c0.host && key(ctxRoots(x)) === key(list));
+  if (same) {
+    switchContext(same.id);
+    same.ws = st;
+    same.label = label;
+    applyCtxSettings(same);
+    renderCtxBar();
+    setMsg(`工作区「${label}」已经开着`);
+    return;
+  }
+  // 当前标签还是空的就用它；已经在用就用它自己的东西，不抢（否则等于把人家正在改的项目换掉）
+  let c = curCtx();
+  if (ctxRoots(c).length) {
+    c = newLocalContext();
+    switchContext(c.id);
+  }
+  if (!(await claimRoot(list[0].path))) {
+    setMsg("这个项目已经在另一个窗口打开了，已经切过去");
+    return;
+  }
+  await applyRoots(c, list, label, st);
+  setMsg(`工作区「${label}」：${list.length} 个文件夹${skipped ? `（${skipped} 个 uri 文件夹跳过）` : ""}`);
 }
 
 // ---------- 终端 ----------
@@ -2333,7 +2859,6 @@ function dropTermSet(id: string) {
 
 function showTerm(on: boolean) {
   $("#term-col").classList.toggle("collapsed", !on);
-  $("#app").classList.toggle("no-term", !on);
   // 收起以后只剩状态栏这个入口能点回来，所以它得一直显示并反映当前状态
   $("#st-term").classList.toggle("off", !on);
   if (on) requestAnimationFrame(() => terms.fitAll());
@@ -2918,7 +3443,48 @@ async function doPull() {
 }
 
 // ---------- 全项目搜索 ----------
-interface SearchHit { path: string; line: number; text: string }
+interface SearchHit { path: string; line: number; col: number; len: number; text: string }
+
+/** 只在某个文件夹里搜（资源管理器右键 → 在文件夹中搜索）；null = 整个工作区 */
+let searchScope: string | null = null;
+/** 和 VS Code 一样的开关：Aa 区分大小写 / ab 全字匹配 / .* 正则 / AB 替换时保留大小写 */
+const seFlags = { case: false, word: false, regex: false, preserve: false };
+/** 上次的搜索结果（折叠展开、逐条替换都要用，别每次重搜） */
+let lastHits: SearchHit[] = [];
+/** 折叠起来的文件（按显示用的相对路径记） */
+const seCollapsed = new Set<string>();
+
+/** 搜索/替换共用的参数（开关 + 包含/排除） */
+function seArgs() {
+  return {
+    caseSensitive: seFlags.case,
+    wholeWord: seFlags.word,
+    regex: seFlags.regex,
+    include: $<HTMLInputElement>("#se-include").value.trim(),
+    exclude: $<HTMLInputElement>("#se-exclude").value.trim(),
+  };
+}
+
+function seReplacing(): boolean {
+  return !$("#se-replace").classList.contains("hidden");
+}
+
+function renderSearchScope() {
+  const box = $("#se-scope");
+  box.classList.toggle("hidden", !searchScope);
+  $("#se-scope-text").textContent = searchScope ? `范围：${relTo(root ?? "", searchScope)}` : "";
+}
+
+/** 在文件夹中搜索：切到搜索面板、聚焦输入框，有词就直接搜 */
+function searchInFolder(p: string) {
+  searchScope = p;
+  renderSearchScope();
+  document.querySelector<HTMLButtonElement>('#activity button[data-act="search"]')?.click();
+  const i = $<HTMLInputElement>("#search-input");
+  i.focus();
+  i.select();
+  if (i.value.trim()) void runSearch();
+}
 
 async function runSearch() {
   const q = $<HTMLInputElement>("#search-input").value.trim();
@@ -2927,71 +3493,210 @@ async function runSearch() {
   if (!q) { list.innerHTML = `<div class="sr-empty">输入关键词，回车搜索（当前工作区）</div>`; return; }
   list.innerHTML = `<div class="sr-empty">搜索中…</div>`;
   try {
-    const hits = await invoke<SearchHit[]>("search", { ...connArg(), cwd: root, query: q, max: 200 });
-    list.innerHTML = "";
-    if (hits.length === 0) {
+    // 有范围就只搜那一个文件夹，否则多根工作区的每个根都搜，结果合在一起
+    const bases = searchScope ? [searchScope] : ctxRoots().map((r) => r.path);
+    const hits: SearchHit[] = [];
+    let firstErr = "";
+    for (const r of bases) {
+      try {
+        hits.push(...(await invoke<SearchHit[]>("search", { ...connArg(), cwd: r, query: q, max: 200, ...seArgs() })));
+      } catch (e) {
+        firstErr ||= String(e); // 正则写错这种要说话，不能静默零结果
+      }
+    }
+    if (!hits.length && firstErr) {
       list.innerHTML = `<div class="sr-empty"></div>`;
-      list.firstElementChild!.textContent = `没有匹配 “${q}”`;
+      list.firstElementChild!.textContent = firstErr;
       return;
     }
-    const base = root.replace(/[\\/]/g, "/").replace(/\/+$/, "");
-    // 按文件分组：同一个文件的命中收在一个标题下面（VS Code 的样子）
-    const groups = new Map<string, SearchHit[]>();
-    for (const h of hits) {
-      const rel = h.path.replace(/[\\/]/g, "/").replace(base + "/", "");
-      const g = groups.get(rel);
-      if (g) g.push(h);
-      else groups.set(rel, [h]);
-    }
-    const sum = document.createElement("div");
-    sum.className = "sr-sum";
-    sum.textContent = `${hits.length} 处匹配 · ${groups.size} 个文件${hits.length >= 200 ? "（已达上限，只显示前 200 处）" : ""}`;
-    list.appendChild(sum);
-
-    for (const [rel, items] of groups) {
-      const head = document.createElement("div");
-      head.className = "sr-head";
-      head.title = items[0].path;
-      const svg = document.createElement("span");
-      svg.className = "ico";
-      svg.innerHTML = iconSvg(iconFor(baseName(rel), false, false));
-      const name = document.createElement("span");
-      name.className = "sr-file";
-      const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/") + 1) : "";
-      if (dir) {
-        const d = document.createElement("span");
-        d.className = "sr-dir";
-        d.textContent = dir;
-        name.appendChild(d);
-      }
-      const nameEl = document.createElement("span");
-      nameEl.textContent = rel.slice(dir.length);
-      name.appendChild(nameEl);
-      const num = document.createElement("span");
-      num.className = "sr-num";
-      num.textContent = String(items.length);
-      head.append(svg, name, num);
-      head.onclick = () => void openFile(items[0].path, items[0].line);
-      list.appendChild(head);
-
-      for (const h of items) {
-        const row = document.createElement("div");
-        row.className = "sr-row";
-        row.title = `${h.path}:${h.line}`;
-        const ln = document.createElement("span");
-        ln.className = "sr-line";
-        ln.textContent = String(h.line);
-        const text = document.createElement("span");
-        text.className = "sr-text";
-        markHit(text, h.text.trim(), q);
-        row.append(ln, text);
-        row.onclick = () => void openFile(h.path, h.line);
-        list.appendChild(row);
-      }
-    }
+    lastHits = hits;
+    renderSearch(q);
   } catch (e) {
     list.innerHTML = "";
     setMsg(`搜索失败：${e}`);
+  }
+}
+
+/** 画结果列表（折叠状态、替换按钮都在这里；重排时不重搜） */
+function renderSearch(q: string) {
+  const list = $("#search-list");
+  const hits = lastHits;
+  list.innerHTML = "";
+  if (hits.length === 0) {
+    list.innerHTML = `<div class="sr-empty"></div>`;
+    list.firstElementChild!.textContent = `没有匹配 “${q}”`;
+    return;
+  }
+  // 按文件分组：同一个文件的命中收在一个标题下面（VS Code 的样子）
+  const groups = new Map<string, SearchHit[]>();
+  for (const h of hits) {
+    const rel = searchScope ? relTo(searchScope, h.path) : wsRelPath(h.path);
+    const g = groups.get(rel);
+    if (g) g.push(h);
+    else groups.set(rel, [h]);
+  }
+  const sum = document.createElement("div");
+  sum.className = "sr-sum";
+  sum.textContent = `${hits.length} 处匹配 · ${groups.size} 个文件${hits.length >= 200 ? "（已达上限，只显示前 200 处）" : ""}`;
+  list.appendChild(sum);
+
+  for (const [rel, items] of groups) {
+    const folded = seCollapsed.has(rel);
+    const head = document.createElement("div");
+    head.className = "sr-head";
+    head.title = items[0].path;
+    const chev = document.createElement("span");
+    chev.className = "sr-chev";
+    chev.textContent = folded ? "▸" : "▾";
+    const svg = document.createElement("span");
+    svg.className = "ico";
+    svg.innerHTML = iconSvg(iconFor(baseName(rel), false, false));
+    const name = document.createElement("span");
+    name.className = "sr-file";
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/") + 1) : "";
+    if (dir) {
+      const d = document.createElement("span");
+      d.className = "sr-dir";
+      d.textContent = dir;
+      name.appendChild(d);
+    }
+    const nameEl = document.createElement("span");
+    nameEl.textContent = rel.slice(dir.length);
+    name.appendChild(nameEl);
+    head.append(chev, svg, name);
+    // 替换模式下，文件行右侧给一个「整个文件替换」按钮（VS Code 悬停也这样）
+    if (seReplacing()) {
+      const all = document.createElement("button");
+      all.className = "sr-act";
+      all.title = "把这个文件里的匹配全部替换掉";
+      all.textContent = "⇄";
+      all.onclick = (ev) => { ev.stopPropagation(); void replaceInFile(items[0].path); };
+      head.appendChild(all);
+    }
+    const num = document.createElement("span");
+    num.className = "sr-num";
+    num.textContent = String(items.length);
+    head.appendChild(num);
+    head.onclick = () => {
+      if (seCollapsed.has(rel)) seCollapsed.delete(rel);
+      else seCollapsed.add(rel);
+      renderSearch(q);
+    };
+    list.appendChild(head);
+    if (folded) continue;
+
+    for (const h of items) {
+      const row = document.createElement("div");
+      row.className = "sr-row";
+      row.title = `${h.path}:${h.line}`;
+      const text = document.createElement("span");
+      text.className = "sr-text";
+      const sn = snippet(h.text, h.col);
+      markRange(text, sn.text, sn.col, h.len, q);
+      row.append(text);
+      if (seReplacing() && h.len > 0) {
+        const one = document.createElement("button");
+        one.className = "sr-act";
+        one.title = "只替换这一处";
+        one.textContent = "⇄";
+        one.onclick = (ev) => { ev.stopPropagation(); void replaceOne(h); };
+        row.appendChild(one);
+      }
+      row.onclick = () => void openFile(h.path, h.line);
+      list.appendChild(row);
+    }
+  }
+}
+
+/** 结果行只留一行：去掉缩进；命中太靠右时把片段挪到命中附近，保证高亮不会被截掉 */
+function snippet(text: string, col: number): { text: string; col: number } {
+  const chars = [...text];
+  let lead = 0;
+  while (lead < chars.length && (chars[lead] === " " || chars[lead] === "	")) lead++;
+  // 命中前面留 8 个字符的上下文就够了：再多命中就会被行尾截掉
+  const cut = col - lead > 20;
+  const start = cut ? Math.max(lead, col - 8) : lead;
+  const shown = chars.slice(start);
+  if (cut) shown.unshift("…");
+  return { text: shown.join(""), col: col - start + (cut ? 1 : 0) };
+}
+
+/** 高亮命中的那一段（后端给了列号/长度就精确标，没给就退回子串查找） */
+function markRange(box: HTMLElement, text: string, col: number, len: number, q: string) {
+  const chars = [...text];
+  if (len > 0 && col + len <= chars.length) {
+    box.appendChild(document.createTextNode(chars.slice(0, col).join("")));
+    const m = document.createElement("mark");
+    m.textContent = chars.slice(col, col + len).join("");
+    box.appendChild(m);
+    box.appendChild(document.createTextNode(chars.slice(col + len).join("")));
+    return;
+  }
+  markHit(box, text, q);
+}
+
+/** 改完盘上的文件：已打开且没改动的文档重新读一遍，树和图标签跟着刷新 */
+async function reloadAfterReplace(paths: string[]) {
+  for (const p of paths) {
+    const d = editor.docsFor(p);
+    if (d && !editor.isDirty(d)) {
+      const res = await invoke<ReadFile>("read_file", { host: d.host, port: d.port, path: p }).catch(() => null);
+      if (res) editor.reopen(p, res.content, res.mtime, res.encoding);
+    }
+  }
+  fileCache = null;
+  renderTabs();
+  if (root) void refreshTree();
+}
+
+/** 只替换一处（结果行右边那个 ⇄） */
+async function replaceOne(h: SearchHit) {
+  const to = $<HTMLInputElement>("#replace-input").value;
+  const chars = [...h.text];
+  const expect = chars.slice(h.col, h.col + h.len).join("");
+  if (!expect) { setMsg("这一处定位不了，重新搜一下再替换"); return; }
+  try {
+    await invoke("replace_at", {
+      ...connArg(),
+      path: h.path,
+      line: h.line,
+      col: h.col,
+      len: h.len,
+      expect,
+      replacement: to,
+      preserveCase: seFlags.preserve,
+    });
+    await reloadAfterReplace([h.path]);
+    setMsg(`已替换 ${baseName(h.path)}:${h.line} 的这一处`);
+    await runSearch();
+  } catch (e) {
+    setMsg(`替换失败：${e}`);
+  }
+}
+
+/** 把一个文件里的匹配全部替换掉（结果文件行右边那个 ⇄） */
+async function replaceInFile(path: string) {
+  const q = $<HTMLInputElement>("#search-input").value.trim();
+  const to = $<HTMLInputElement>("#replace-input").value;
+  if (!q) return;
+  const cwd = rootOf(path) ?? searchScope ?? root;
+  if (!cwd) return;
+  try {
+    const changed = await invoke<string[]>("replace_all", {
+      ...connArg(),
+      cwd,
+      query: q,
+      replacement: to,
+      max: 200,
+      ...seArgs(),
+      preserveCase: seFlags.preserve,
+      only: [relTo(cwd, path)],
+    });
+    await reloadAfterReplace(changed.map((rel) => absJoin(cwd, rel)));
+    setMsg(changed.length ? `已替换 ${baseName(path)} 里的全部匹配` : "这个文件里没有可替换的了");
+    await runSearch();
+  } catch (e) {
+    setMsg(`替换失败：${e}`);
   }
 }
 
@@ -3025,19 +3730,23 @@ async function runReplace() {
   if (r !== "ok") return;
   setMsg("替换中…");
   try {
-    const changed = await invoke<string[]>("replace_all", { ...connArg(), cwd: root, query: q, replacement: to, max: 200 });
-    for (const rel of changed) {
-      const abs = absJoin(root, rel);
-      const d = editor.docsFor(abs);
-      if (d && !editor.isDirty(d)) {
-        const res = await invoke<ReadFile>("read_file", { host: d.host, port: d.port, path: abs }).catch(() => null);
-        if (res) editor.reopen(abs, res.content, res.mtime, res.encoding);
-      }
+    const bases = searchScope ? [searchScope] : ctxRoots().map((r) => r.path);
+    const touched: string[] = [];
+    for (const cwd of bases) {
+      const changed = await invoke<string[]>("replace_all", {
+        ...connArg(),
+        cwd,
+        query: q,
+        replacement: to,
+        max: 200,
+        ...seArgs(),
+        preserveCase: seFlags.preserve,
+      });
+      touched.push(...changed.map((rel) => absJoin(cwd, rel)));
     }
-    fileCache = null;
-    setMsg(changed.length ? `替换了 ${changed.length} 个文件` : "没有文件被改");
+    await reloadAfterReplace(touched);
+    setMsg(touched.length ? `替换了 ${touched.length} 个文件` : "没有文件被改");
     await runSearch();
-    renderTabs();
   } catch (e) {
     setMsg(`替换失败：${e}`);
   }
@@ -3189,8 +3898,6 @@ async function boot() {
   $<HTMLButtonElement>("#btn-new-term").onclick = () => { showTerm(true); void terms.newPage(true); };
   // 界面小按钮统一用自绘 SVG（＋ ✕ ˅），别用字体里那些大小不一的符号
   for (const [id, name] of [
-    ["#ctx-new", "plus"],
-    ["#btn-open-folder", "plus"],
     ["#btn-ssh-new", "plus"],
     ["#btn-new-term", "plus"],
     ["#btn-term-type", "chevron"],
@@ -3258,34 +3965,6 @@ async function boot() {
     Math.max(240, Math.min(window.innerWidth - 420, window.innerWidth - x))
   );
 
-  $<HTMLButtonElement>("#ctx-new").onclick = async () => {
-    saveCtxs();
-    // 「+」永远是本机项目：当前看的是 SSH 时，它的 /root 和远端目录都不该混进来
-    const local = { host: null, port: 22 };
-    const dir = await pickFolder(curCtx().kind === "local" ? root ?? undefined : undefined, local);
-    if (!dir) return; // 没选就不建标签
-    const dup = contexts.find((x) => x.kind === "local" && x.root === dir);
-    if (dup) {
-      switchContext(dup.id);
-      setMsg(`这个文件夹已经开在「${dup.label}」标签里`);
-      return;
-    }
-    const c = newLocalContext();
-    activeId = c.id;
-    applyActive();
-    // 编辑区和终端要当场切到新项目（空），否则新标签高亮了、里面还是上一个项目的文件
-    editor.setCtx(c.id);
-    renderTabs();
-    renderStatusInfo();
-    bindTermSet();
-    setConnLabel();
-    renderCtxBar();
-    c.root = dir;
-    c.label = baseName(dir) || c.label;
-    await openRoot(dir);
-    saveCtxs();
-    setMsg(`已打开 ${dir}`);
-  };
   $("#tree").addEventListener("scroll", hideTip, true);
 
   // 标签栏：滚轮直接横向滚（滚轮是竖直的，浏览器不会帮你滚一个只能横滚的容器）
@@ -3330,10 +4009,10 @@ async function boot() {
   // 从别的窗口拖出来的：Rust 那边存了一份"该打开什么"，取一次就够
   if (!IS_MAIN) {
     const raw = await invoke<string | null>("window_payload", { id: WIN }).catch(() => null);
-    const p = raw ? (JSON.parse(raw) as { kind: "local" | "ssh"; label: string; root: string | null; host: string | null; port: number }) : null;
+    const p = raw ? (JSON.parse(raw) as { kind: "local" | "ssh"; label: string; root: string | null; host: string | null; port: number; ws?: CtxWs; roots?: RootEntry[] }) : null;
     if (p) {
       contexts.length = 0;
-      contexts.push({ id: "local:1", kind: p.kind, label: p.label, host: p.host, port: p.port, root: p.root, online: p.kind === "ssh" ? false : undefined });
+      contexts.push({ id: "local:1", kind: p.kind, label: p.label, host: p.host, port: p.port, root: p.root, ws: p.ws, roots: p.roots, online: p.kind === "ssh" ? false : undefined });
       activeId = "local:1";
     }
   }
@@ -3377,6 +4056,61 @@ async function boot() {
     if (e.key === "Enter") { e.preventDefault(); void runReplace(); }
   });
   $<HTMLButtonElement>("#replace-all").onclick = () => void runReplace();
+  // Aa / ab / .* 三个开关：点了立刻按新条件重搜（有词才搜）
+  for (const [key, id] of [["case", "#se-case"], ["word", "#se-word"], ["regex", "#se-regex"]] as const) {
+    const b = $<HTMLButtonElement>(id);
+    b.onclick = () => {
+      seFlags[key] = !seFlags[key];
+      b.classList.toggle("on", seFlags[key]);
+      if ($<HTMLInputElement>("#search-input").value.trim()) void runSearch();
+    };
+  }
+  // AB 保留大小写（替换时才用得上）
+  $<HTMLButtonElement>("#se-preserve").onclick = () => {
+    seFlags.preserve = !seFlags.preserve;
+    $<HTMLButtonElement>("#se-preserve").classList.toggle("on", seFlags.preserve);
+  };
+  // ⋯ 展开「文件包含 / 排除」；改完回车或失焦重搜
+  $<HTMLButtonElement>("#se-more").onclick = () => {
+    $("#se-files").classList.toggle("hidden");
+  };
+  for (const id of ["#se-include", "#se-exclude"]) {
+    const el = $<HTMLInputElement>(id);
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter" && $<HTMLInputElement>("#search-input").value.trim()) void runSearch(); });
+    el.addEventListener("change", () => { if ($<HTMLInputElement>("#search-input").value.trim()) void runSearch(); });
+  }
+  // 全部折叠 / 全部展开（看当前是哪种状态就切过去）
+  $<HTMLButtonElement>("#se-fold").onclick = () => {
+    const q = $<HTMLInputElement>("#search-input").value.trim();
+    if (!q || !lastHits.length) return;
+    const files = new Set(lastHits.map((h) => (searchScope ? relTo(searchScope, h.path) : wsRelPath(h.path))));
+    const allFolded = [...files].every((f) => seCollapsed.has(f));
+    if (allFolded) seCollapsed.clear();
+    else for (const f of files) seCollapsed.add(f);
+    $<HTMLButtonElement>("#se-fold").title = allFolded ? "全部折叠" : "全部展开";
+    $<HTMLButtonElement>("#se-fold").textContent = allFolded ? "⊟" : "⊞";
+    renderSearch(q);
+  };
+  // 面板头的两个按钮 + 折叠替换框（VS Code 搜索框左边那个小箭头）
+  $<HTMLButtonElement>("#se-refresh").onclick = () => { if ($<HTMLInputElement>("#search-input").value.trim()) void runSearch(); };
+  $<HTMLButtonElement>("#se-clear").onclick = () => {
+    lastHits = [];
+    seCollapsed.clear();
+    $<HTMLInputElement>("#search-input").value = "";
+    $("#search-list").innerHTML = `<div class="sr-empty">输入关键词，回车搜索（当前工作区）</div>`;
+  };
+  $<HTMLButtonElement>("#se-repl-toggle").onclick = () => {
+    const row = $("#se-replace");
+    const open = !row.classList.toggle("hidden");
+    $<HTMLButtonElement>("#se-repl-toggle").textContent = open ? "▾" : "▸";
+    const q = $<HTMLInputElement>("#search-input").value.trim();
+    if (q && lastHits.length) renderSearch(q); // 逐条/逐文件的替换按钮只在替换模式下显示
+  };
+  $<HTMLButtonElement>("#se-scope-clear").onclick = () => {
+    searchScope = null;
+    renderSearchScope();
+    if ($<HTMLInputElement>("#search-input").value.trim()) void runSearch();
+  };
   $<HTMLSpanElement>("#st-term").onclick = () => toggleTerm();
   $<HTMLSpanElement>("#st-fwd").onclick = async () => {
     const fwds = await invoke<Forward[]>("fwd_list").catch(() => []);
@@ -3407,14 +4141,6 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void doCommit(); }
   });
 
-  $<HTMLButtonElement>("#btn-open-folder").onclick = async () => {
-    // 本机也叫自带的浏览弹窗：系统那个资源管理器框在部分机器上要转好几秒
-    const dir = await pickFolder(root ?? undefined);
-    if (!dir) return;
-    await openRoot(dir);
-    setMsg(`工作区：${dir}`);
-  };
-
   document.querySelectorAll<HTMLButtonElement>("#activity button").forEach((b) => {
     b.onclick = () => {
       const act = b.dataset.act;
@@ -3422,12 +4148,14 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       if (b.classList.contains("active") && !$("#sidebar").classList.contains("collapsed")) {
         $("#sidebar").classList.add("collapsed");
         b.classList.remove("active");
+        requestAnimationFrame(() => terms.fitAll()); // 编辑器/终端变宽了，xterm 要重排
         return;
       }
       document.querySelectorAll("#activity button").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
       $("#sidebar").classList.remove("collapsed");
-      const titles: Record<string, string> = { explorer: "资源管理器", search: "搜索", scm: "源代码管理", ssh: "SSH 连接" };
+      requestAnimationFrame(() => terms.fitAll());
+      sideAct = act ?? "explorer";
       // 这条头只服务于文件树（标题 + 打开文件夹）；搜索/源代码管理/SSH 都各有自己的头
       $("#side-head").classList.toggle("hidden", act !== "explorer");
       $("#tree").classList.toggle("hidden", act !== "explorer");
@@ -3435,7 +4163,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       $("#scm").classList.toggle("active", act === "scm");
       $("#ssh-panel").classList.toggle("active", act === "ssh");
       if (act === "ssh") renderSsh();
-      $<HTMLSpanElement>("#sidebar-title").textContent = titles[act ?? "explorer"] ?? "资源管理器";
+      renderSidebarTitle();
       if (act === "scm" || act === "explorer") void loadGit();
       if (act === "search") $<HTMLInputElement>("#search-input").focus();
       // 点回资源管理器时把文件树对齐到当前文件（可能是之前在搜索面板里打开的文件）
@@ -3522,6 +4250,10 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
 
   $<HTMLSpanElement>("#st-enc").onclick = () => void pickEncoding();
   $<HTMLSpanElement>("#st-md").onclick = () => toggleMdPreview();
+  $<HTMLSpanElement>("#st-ws").onclick = () => {
+    const d = editor.current();
+    if (d && isWsFile(d.path)) void openRoot(d.path);
+  };
   $<HTMLButtonElement>("#tab-md").onclick = () => toggleMdPreview();
   // 自定义标题栏的三个按钮（SVG 自绘，跟其它图标同一套笔画）
   const WIN_ICON = {
@@ -3708,7 +4440,10 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
       const local = contexts.find((c) => c.kind === "local");
       if (local) switchContext(local.id);
     }
-    for (const p of e.payload.paths) void openFile(p);
+    for (const p of e.payload.paths) {
+      if (isWsFile(p)) void openRoot(p); // 拖进来的 .code-workspace 当工作区开，不是当文本看
+      else void openFile(p);
+    }
   });
 
   await listen<{ path: string; line?: number }>("bridge:open", (e) => {
@@ -3777,7 +4512,7 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   setInterval(() => { void pushBridgeState(); }, 2000);
   setInterval(snapshotDirty, 3000);
 
-  if (!root) setMsg("就绪：点击左侧 ＋ 打开文件夹，或点 🔌 连接 SSH");
+  if (!root) setMsg("就绪：菜单「文件 → 打开文件夹…」或「打开工作区文件…」，也可以点 🔌 连接 SSH");
   void restoreDirty();
   // 启动后静默查一次：只在主窗口、只在打包版。
   // 多开窗口时每个窗口都查一遍没意义（还会弹好几个框）；开发时每次热重载都查一次，纯属给 GitHub 添堵
@@ -3844,9 +4579,19 @@ let fileCache: { key: string; list: string[] } | null = null;
 
 async function listFiles(): Promise<string[]> {
   const c = curCtx();
-  const key = `${c.host ?? ""}|${c.root}`;
+  const roots = ctxRoots(c);
+  const key = `${c.host ?? ""}|${roots.map((r) => r.path).join("|")}`;
   if (fileCache?.key === key) return fileCache.list;
-  const list = await invoke<string[]>("list_files", { host: c.host, port: c.port, root: c.root, max: 20000 });
+  // 多根工作区：每个根各拉一份，拼成绝对路径（打开时直接能吃）
+  const raw: string[] = [];
+  for (const r of roots) {
+    try {
+      const rels = await invoke<string[]>("list_files", { host: c.host, port: c.port, root: r.path, max: 20000 });
+      for (const p of rels) raw.push(joinPath(r.path, p.replace(/^\/+/, "")));
+    } catch { /* 某个根列不出来不影响其它根 */ }
+  }
+  // files.exclude 里的东西在 VS Code 的 Ctrl+P 里也不会冒出来，这里一样
+  const list = excludedList(raw);
   fileCache = { key, list };
   return list;
 }
@@ -3898,7 +4643,7 @@ async function quickOpen() {
       const row = document.createElement("div");
       row.className = "pk-row" + (i === sel ? " sel" : "");
       row.innerHTML = `<span class="ico">${iconSvg(iconFor(baseName(p), false, false))}</span><span class="name"></span>`;
-      row.querySelector(".name")!.textContent = p;
+      row.querySelector(".name")!.textContent = wsRelPath(p);
       row.onmousedown = (ev) => { ev.preventDefault(); sel = i; void pick(); };
       box.appendChild(row);
     });
@@ -3907,7 +4652,7 @@ async function quickOpen() {
   const refresh = () => {
     const q = input.value.trim().toLowerCase();
     rows = all
-      .map((p) => [p, fuzzyScore(p, q)] as [string, number])
+      .map((p) => [p, fuzzyScore(wsRelPath(p), q)] as [string, number])
       .filter(([, s]) => s > 0)
       .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))
       .slice(0, 200)
@@ -3919,7 +4664,7 @@ async function quickOpen() {
     const p = rows[sel];
     closeModal();
     if (!p) return;
-    await openFile(joinPath(root!, p));
+    await openFile(p);
   };
   input.oninput = refresh;
   input.onkeydown = (e) => {
@@ -3955,7 +4700,7 @@ async function showCommandPalette() {
     closeModal();
     if (v.includes("ssh") && v.includes("断")) disconnect();
     else if (v.includes("ssh")) document.querySelector<HTMLButtonElement>('#activity button[data-act="ssh"]')?.click();
-    else if (v.includes("文件夹") || v.includes("folder")) $("#btn-open-folder").click();
+    else if (v.includes("文件夹") || v.includes("folder")) void openFolderDialog();
     else if (v.includes("终端") || v.includes("term")) { showTerm(true); void terms.newTerminal(); }
     else if (v.includes("保存") || v.includes("save")) void saveCurrent();
     else if (v.includes("转发") || v.includes("forward")) void addForward();

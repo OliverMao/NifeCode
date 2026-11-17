@@ -1,6 +1,6 @@
 [package]
 name = "nifecode"
-version = "0.1.18"
+version = "0.1.19"
 description = "轻量 VS Code 兼容编辑器（本地 + SSH + 终端 + Agent Bridge）"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -25,6 +25,8 @@ keyring = { version = "3", default-features = false, features = ["windows-native
 tauri-plugin-clipboard-manager = "2.5.0"
 encoding_rs = "0.8.44"
 ignore = "0.4.34"
+# 搜索面板的「使用正则」；Cargo.lock 里本来就有（tauri 的传递依赖），不算新增包
+regex = "1"
 
 # 只为了读剪贴板里的文件列表（CF_HDROP）；Tauri 的剪贴板插件不给文件
 [target.'cfg(windows)'.dependencies]

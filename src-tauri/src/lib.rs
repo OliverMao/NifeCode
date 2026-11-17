@@ -66,6 +66,7 @@ pub fn run() {
             clip::clip_set_files,
             fsops::find_repos,
             fsops::replace_all,
+            fsops::replace_at,
             fsops::read_binary,
             fsops::fs_open,
             fsops::ssh_forget_host,
