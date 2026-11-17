@@ -1361,6 +1361,7 @@ const DOC_EXT = ["docx", "pptx", "doc", "ppt", "pdf"];
 
 async function openFile(path: string, line?: number, focus = true) {
   path = openAs(path); // 同一个文件换个写法又开一次 → 回到已经开着的那份，不再堆一个新标签
+  editor.adopt(path, curCtx().host, curCtx().port); // 开在另一个工作区/SSH 标签里的同一个文件：挪过来，否则这边没标签可关
   if (editor.has(path)) {
     editor.show(path, focus);
     const shown = editor.current()?.path === path;
