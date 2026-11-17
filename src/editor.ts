@@ -74,7 +74,9 @@ const LANG: Record<string, string> = {
   sh: "shell", bash: "shell", zsh: "shell", ps1: "powershell", psm1: "powershell",
   yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", conf: "ini", xml: "xml", svg: "xml",
   sql: "sql", kt: "kotlin", swift: "swift", lua: "lua", dart: "dart", vue: "html",
-  dockerfile: "dockerfile", gitignore: "plaintext", txt: "plaintext", log: "plaintext",
+  dockerfile: "dockerfile", txt: "plaintext", log: "plaintext",
+  // 这些配置文件的注释就是 `#`，挂到 ini 上就能用 Ctrl+/ 注释了（落到 plaintext 时 Monaco 没有注释符，按了没反应）
+  env: "ini", gitignore: "ini", dockerignore: "ini", npmrc: "ini", editorconfig: "ini", properties: "ini",
 };
 
 export function languageOf(path: string): string {
@@ -271,6 +273,23 @@ export class EditorHost {
   ctxOf(path: string): string | undefined {
     for (const [id, m] of this.maps) if (m.has(path)) return id;
     return undefined;
+  }
+
+  /**
+   * 把开在别的上下文（另一个工作区 / SSH 标签）里的同一个文件认领到当前上下文。
+   * 不认领的话：内容能显示但这边没有标签可关，而且再 open 一次会在同一路径上新建模型（Monaco 不允许）。
+   * 只认 host/port 相同的——远端 `/home/u/a.ts` 在两个服务器上是两个文件，不能搬。
+   */
+  adopt(path: string, host: string | null, port: number): boolean {
+    if (this.docs.has(path)) return true;
+    const from = this.ctxOf(path);
+    if (from === undefined) return false;
+    const src = this.maps.get(from)!.get(path)!;
+    if (src.host !== host || src.port !== port) return false;
+    this.maps.get(from)!.delete(path);
+    if (this.actives.get(from) === path) this.actives.delete(from);
+    this.docs.set(path, src);
+    return true;
   }
 
   isDirty(d: Doc): boolean {
