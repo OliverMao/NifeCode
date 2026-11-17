@@ -347,7 +347,8 @@ export class EditorHost {
     host: string | null = null,
     port = 22,
     encoding = "utf-8",
-    readOnly = false
+    readOnly = false,
+    focus = true
   ): Doc {
     let d = this.docs.get(path);
     if (!d) {
@@ -367,7 +368,7 @@ export class EditorHost {
       this.docs.set(path, d);
       this.byModel.set(model, d);
     }
-    this.show(path);
+    this.show(path, focus);
     return d;
   }
 
@@ -389,14 +390,17 @@ export class EditorHost {
     return d && d.model.getEOL() === "\r\n" ? "CRLF" : "LF";
   }
 
-  show(path: string) {
+  show(path: string, focus = true) {
     const d = this.find(path);
     if (!d) return;
+    // 被动打开（focus=false，比如 agent 通过 /open 让你看文件）不抢键盘焦点；
+    // 编辑器里正在打字时索性不切过去，否则接着敲的字会写进被打开的那个文件
+    if (!focus && this.ed.hasTextFocus()) return;
     this.actives.set(this.ctx, path);
     if (this.ed.getModel() !== d.model) this.ed.setModel(d.model);
     this.ed.updateOptions({ readOnly: d.readOnly }); // 超大文件只读
     this.applyViewOptions();
-    this.ed.focus();
+    if (focus) this.ed.focus();
   }
 
   revealLine(line: number) {

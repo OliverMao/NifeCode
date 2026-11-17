@@ -1359,12 +1359,13 @@ const IMAGE_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"];
 // docx/pptx/pdf 走预览；doc/ppt 是老二进制格式，只能甩给系统程序
 const DOC_EXT = ["docx", "pptx", "doc", "ppt", "pdf"];
 
-async function openFile(path: string, line?: number) {
+async function openFile(path: string, line?: number, focus = true) {
   path = openAs(path); // 同一个文件换个写法又开一次 → 回到已经开着的那份，不再堆一个新标签
   if (editor.has(path)) {
-    editor.show(path);
-    if (line) editor.revealLine(line);
-    renderTabs(path);
+    editor.show(path, focus);
+    const shown = editor.current()?.path === path;
+    if (line && shown) editor.revealLine(line);
+    renderTabs(shown ? path : undefined);
     return;
   }
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -1395,12 +1396,14 @@ async function openFile(path: string, line?: number) {
         return;
       }
     }
-    const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge || !!res.binary);
+    const d = editor.open(path, res.content, res.mtime, c.host, c.port, res.encoding, !!res.huge || !!res.binary, focus);
     if (res.binary) setMsg(`${baseName(path)} 是二进制文件，已只读打开`);
     else if (d.ansi) setMsg(`${baseName(path)} 里的 ANSI 颜色码已去掉（保存会连着它们一起写掉）`);
     else if (res.huge) setMsg(`${baseName(path)} 超过 8MB，已只读打开`);
-    if (line) editor.revealLine(line);
-    renderTabs(path);
+    // 被动打开时可能没切过去（见 editor.show），那就别抢着滚动/高亮标签
+    const shown = editor.current()?.path === path;
+    if (line && shown) editor.revealLine(line);
+    renderTabs(shown ? path : undefined);
     if (!res.huge && !res.binary) $<HTMLSpanElement>("#st-msg").textContent = path;
     void d;
   } catch (e) {
@@ -3711,7 +3714,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     // 相对路径按工作区根算，别落到编辑器进程的 cwd 上
     const p = e.payload.path.replace(/\\/g, "/");
     const abs = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/");
-    void openFile((abs || !root ? p : joinPath(root, p)).replace(/\\/g, "/"), e.payload.line);
+    // focus = false：agent 改完文件调 /open 是"给你看"，不能把焦点从你手上抢走
+    void openFile((abs || !root ? p : joinPath(root, p)).replace(/\\/g, "/"), e.payload.line, false);
   });
   // 外面（agent）要保存文件：写完把结果回给 Rust，HTTP 那边才回 200/500
   await listen<{ path?: string }>("bridge:save", async (e) => {
