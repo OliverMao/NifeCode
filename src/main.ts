@@ -748,8 +748,9 @@ interface Settings {
   shell: string;
   confirmClose: boolean;
   snapshot: boolean;
+  restoreTabs: boolean;
 }
-const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, unicodeHighlight: false, stripAnsi: true, eol: "lf", shell: "", confirmClose: true, snapshot: true };
+const SET_DEFAULTS: Settings = { minimap: true, wordWrap: false, unicodeHighlight: false, stripAnsi: true, eol: "lf", shell: "", confirmClose: true, snapshot: true, restoreTabs: false };
 
 function loadSettings(): Settings {
   const b = (k: string, d: boolean) => (ls.get(k) === null ? d : ls.get(k) === "1");
@@ -762,6 +763,7 @@ function loadSettings(): Settings {
     shell: ls.get("term-shell") ?? SET_DEFAULTS.shell,
     confirmClose: b("confirm-close", SET_DEFAULTS.confirmClose),
     snapshot: b("snapshot", SET_DEFAULTS.snapshot),
+    restoreTabs: b("restore-tabs", SET_DEFAULTS.restoreTabs),
   };
 }
 const settings = loadSettings();
@@ -842,6 +844,7 @@ async function showSettings() {
   rows.push(sec("常规"));
   rows.push(row("关闭前确认", "有未保存的更改时询问", check("set-confirm", settings.confirmClose)));
   rows.push(row("会话恢复", "异常退出后恢复未保存内容", check("set-snapshot", settings.snapshot)));
+  rows.push(row("启动时恢复上次的标签", "关着时启动就是干净一个本机标签（上次没关的项目不会再自动打开）", check("set-restore-tabs", settings.restoreTabs)));
 
   rows.push(sec("系统集成"));
   rows.push(
@@ -916,6 +919,10 @@ async function showSettings() {
   on<HTMLInputElement>("set-snapshot")?.addEventListener("change", (e) => {
     settings.snapshot = (e.target as HTMLInputElement).checked;
     save("snapshot", settings.snapshot ? "1" : "0");
+  });
+  on<HTMLInputElement>("set-restore-tabs")?.addEventListener("change", (e) => {
+    settings.restoreTabs = (e.target as HTMLInputElement).checked;
+    save("restore-tabs", settings.restoreTabs ? "1" : "0"); // 下次启动生效
   });
   on<HTMLInputElement>("set-shell-menu")?.addEventListener("change", async (e) => {
     const cb = e.target as HTMLInputElement;
@@ -1010,7 +1017,7 @@ async function pickFolder(start?: string, conn = connArg(), opts: PickOpts = {})
   const from = start || (conn.host ? "/" : (await invoke<string | null>("home_dir").catch(() => null)) ?? "/");
   const m = $("#modal");
   m.querySelector(".title")!.textContent =
-    opts.title ?? (pick === "file" ? "打开文件" : pick === "ws" ? "打开工作区文件" : conn.host ? "打开远端文件夹" : "打开文件夹");
+    opts.title ?? (pick === "file" ? "打开文件" : pick === "ws" ? "打开工作区文件" : conn.host ? "打开远端文件夹" : "打开本机文件夹");
   const body = m.querySelector(".body") as HTMLDivElement;
   const acts = m.querySelector(".actions") as HTMLDivElement;
   body.style.whiteSpace = "normal";
@@ -1208,13 +1215,19 @@ function closeGone(paths: string[]) {
 /** 左上角唯一的菜单（点 logo 出来）：打开/新建/加文件夹/设置/关于都在这儿 */
 function mainMenu(): MenuItem[] {
   const dir = pasteTarget();
+  // 本机 / 远端分开列：SSH 标签上「打开文件夹」只能选远端目录，本机目录就再也点不到了
+  const ssh = curCtx().kind === "ssh" ? curCtx() : null;
   return [
     { label: "新建文件…", run: () => { if (dir) void newEntry(dir, false); } },
     { label: "新建文件夹…", run: () => { if (dir) void newEntry(dir, true); } },
     "sep",
-    { label: "打开文件…", run: () => void openFileDialog() },
-    { label: "打开文件夹…", run: () => void openFolderDialog() },
-    { label: "打开工作区文件…", run: () => void openWorkspaceDialog() },
+    { label: "打开本机文件…", run: () => void openFileDialog() },
+    { label: "打开本机文件夹…", run: () => void openFolderDialog() },
+    { label: "打开本机工作区文件…", run: () => void openWorkspaceDialog() },
+    ...(ssh
+      ? ([{ label: `打开远端文件…（${ssh.label}）`, run: () => void openRemoteFileDialog() },
+          { label: `打开远端文件夹…（${ssh.label}）`, run: () => void openRemoteFolderDialog() }] as MenuItem[])
+      : []),
     { label: "将文件夹添加到工作区…", run: () => void addFolderToWorkspace() },
     "sep",
     { label: "保存", run: () => void saveCurrent() },
@@ -1989,7 +2002,7 @@ function treeMenu(e: Entry, paths: string[]): MenuItem[] {
   if (multi) items.push({ label: `${paths.length} 项已选择`, run: () => {} });
   else if (!e.is_dir) items.push({ label: "打开", run: () => void openFile(e.path) });
   else items.push(
-    { label: "在此打开工作区", run: () => void openRoot(e.path) },
+    { label: "在此打开工作区", run: () => void (host ? openRoot(e.path) : openLocalEntryTab(e.path)) },
     { label: "在文件夹中搜索…", run: () => searchInFolder(e.path) }
   );
   items.push(
@@ -2446,6 +2459,108 @@ async function claimRoot(next?: string): Promise<boolean> {
   return !other;
 }
 
+// ---------- 本机 / 远端分路：打开文件夹、打开文件都先想清楚这是哪边的东西 ----------
+/** 本机连接（host = null）：本机选择器、本机操作都用它，别拿当前 SSH 标签的连接去凑 */
+const LOCAL_CONN = { host: null as string | null, port: 22 };
+
+/** 本机选择器的起点：当前标签是 SSH 时不能把远端路径塞进本机选择器 */
+function localStart(p?: string | null): string | undefined {
+  return curCtx().kind === "local" ? (p ?? root ?? undefined) : undefined;
+}
+
+/** 本机路径比较：Windows 不区分大小写，比之前先去掉尾斜杠 */
+function sameLocal(a: string, b: string): boolean {
+  return cleanPath(a).replace(/\/+$/, "").toLowerCase() === cleanPath(b).replace(/\/+$/, "").toLowerCase();
+}
+
+/** 这个标签里有没有这个东西（根目录，或者它是由哪个 .code-workspace 开的） */
+function ctxHasPath(c: Ctx, path: string): boolean {
+  if (c.ws?.file && sameLocal(c.ws.file, path)) return true;
+  return ctxRoots(c).some((r) => sameLocal(r.path, path));
+}
+
+/** 本机路径落在哪个本机标签的根里（嵌套根取最长匹配）；一个都不是就 null */
+function localCtxOf(path: string): Ctx | null {
+  const q = cleanPath(path).toLowerCase();
+  let best: Ctx | null = null;
+  let len = -1;
+  for (const c of contexts) {
+    if (c.kind !== "local") continue;
+    for (const r of ctxRoots(c)) {
+      const b = cleanPath(r.path).replace(/\/+$/, "").toLowerCase();
+      if ((q === b || q.startsWith(`${b}/`)) && b.length > len) {
+        best = c;
+        len = b.length;
+      }
+    }
+  }
+  return best;
+}
+
+/** 本机操作该站到哪个标签：当前已经是本机就用它，否则找本机标签，一个都没有就开一个 */
+function localTargetCtx(): Ctx {
+  const cur = curCtx();
+  if (cur.kind === "local") return cur;
+  const c = contexts.find((x) => x.kind === "local") ?? newLocalContext();
+  if (c.id !== activeId) switchContext(c.id);
+  return c;
+}
+
+/**
+ * 打开本机的文件夹 / .code-workspace：已经在某个标签里就切过去；否则当前标签还空着就用它，
+ * 当前标签是 SSH、或者已经装着别的文件夹时另开一个标签 —— 绝不把现在这个标签换掉。
+ */
+async function openLocalEntryTab(path: string) {
+  path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const dup = contexts.find((c) => c.kind === "local" && ctxHasPath(c, path));
+  if (dup) {
+    if (dup.id !== activeId) switchContext(dup.id);
+    setMsg(`「${dup.label}」已经开着了`);
+    return;
+  }
+  const cur = curCtx();
+  if (cur.kind !== "local" || ctxRoots(cur).length) {
+    // 别的窗口已经开着这个项目就别再开一个空标签（check 会把那个窗口顶到前面）
+    // 本机路径的登记用 host: null，不能拿当前这个 SSH 标签的 host 去凑
+    if (!isWsFile(path)) {
+      const other = await invoke<string | null>("window_claim_root", { id: WIN, host: null, root: path, check: true }).catch(() => null);
+      if (other) {
+        setMsg("这个项目已经在另一个窗口打开了，已经切过去");
+        return;
+      }
+    }
+    switchContext(newLocalContext().id);
+  }
+  await openRoot(path);
+}
+
+/** 打开一个本机文件：它属于哪个本机标签就在那儿开（不另开标签），都不属于就沿用当前本机标签 */
+async function openLocalFile(path: string, line?: number, focus = true) {
+  const c = localCtxOf(path) ?? localTargetCtx();
+  if (c.id !== activeId) switchContext(c.id);
+  await openFile(path, line, focus);
+}
+
+/**
+ * 资源管理器右键「用 NifeCode 打开」、命令行带进来的路径：文件夹 → 开成（新的）标签；
+ * 文件 → 开在它所属的标签里，哪个标签都不属于就先给它所在目录开一个标签。
+ */
+async function openFromShell(path: string, opts: { isDir?: boolean; line?: number } = {}) {
+  path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  if (opts.isDir) {
+    await openLocalEntryTab(path);
+    return;
+  }
+  const owner = localCtxOf(path);
+  if (owner) {
+    if (owner.id !== activeId) switchContext(owner.id);
+    await openFile(path, opts.line);
+    return;
+  }
+  await openLocalEntryTab(parentOf(path));
+  await openFile(path, opts.line);
+}
+
 async function openRoot(path: string, ws?: CtxWs) {
   // 统一成正斜杠：右键菜单/命令行/手输都可能给反斜杠，混着会导致树里路径和标签路径对不上
   path = path.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
@@ -2503,31 +2618,44 @@ async function applyRoots(c: Ctx, roots: RootEntry[], label: string, ws?: CtxWs,
   void loadGit();
 }
 
-/** 文件 → 打开文件夹…（当前标签已经有工作区就新开一个标签，和 ＋ 一样） */
+/** 文件 → 打开本机文件夹…（当前标签已经有工作区就新开一个标签，和 ＋ 一样） */
 async function openFolderDialog() {
-  const dir = await pickFolder(root ?? undefined);
+  const dir = await pickFolder(localStart(), LOCAL_CONN, { title: "打开本机文件夹" });
   if (!dir) return;
-  if (isWsFile(dir)) return void openRoot(dir); // 在文件夹选择器里点到了 .code-workspace
+  await openLocalEntryTab(dir); // 在面板里点到了 .code-workspace 也走同一条路
+}
+
+/** 文件 → 打开本机文件…（VS Code 的 Ctrl+O）；选到 .code-workspace 就当工作区开 */
+async function openFileDialog() {
+  const p = await pickFolder(localStart(), LOCAL_CONN, { pick: "file", okText: "打开", title: "打开本机文件" });
+  if (!p) return;
+  if (isWsFile(p)) await openLocalEntryTab(p);
+  else await openLocalFile(p);
+}
+
+/** 文件 → 打开本机工作区文件… */
+async function openWorkspaceDialog() {
+  const p = await pickFolder(localStart(), LOCAL_CONN, { pick: "ws", title: "打开本机工作区文件" });
+  if (p) await openLocalEntryTab(p);
+}
+
+/** 文件 → 打开远端文件夹…（当前这个 SSH 连接上的目录） */
+async function openRemoteFolderDialog() {
   const c = curCtx();
-  if (ctxRoots(c).length) {
-    const nc = newLocalContext();
-    switchContext(nc.id);
-  }
+  if (c.kind !== "ssh") return void openFolderDialog();
+  const dir = await pickFolder(root ?? undefined, { host: c.host, port: c.port }, { title: `打开远端文件夹（${c.label}）` });
+  if (!dir) return;
   await openRoot(dir);
 }
 
-/** 文件 → 打开文件…（VS Code 的 Ctrl+O）；选到 .code-workspace 就当工作区开 */
-async function openFileDialog() {
-  const p = await pickFolder(root ?? undefined, connArg(), { pick: "file" });
+/** 文件 → 打开远端文件…（当前这个 SSH 连接上的文件） */
+async function openRemoteFileDialog() {
+  const c = curCtx();
+  if (c.kind !== "ssh") return void openFileDialog();
+  const p = await pickFolder(root ?? undefined, { host: c.host, port: c.port }, { pick: "file", okText: "打开", title: `打开远端文件（${c.label}）` });
   if (!p) return;
   if (isWsFile(p)) await openRoot(p);
   else await openFile(p);
-}
-
-/** 文件 → 打开工作区文件… */
-async function openWorkspaceDialog() {
-  const p = await pickFolder(root ?? undefined, connArg(), { pick: "ws" });
-  if (p) await openRoot(p);
 }
 
 /** 文件 → 将文件夹添加到工作区…（VS Code 的 Add Folder to Workspace） */
@@ -4005,7 +4133,9 @@ async function boot() {
     b.innerHTML = uiIcon(b.dataset.act ?? "");
   });
 
-  restoreCtxs();
+  // 启动时的标签：默认不恢复上次没关的那些（设置里可以打开）。否则「用 NifeCode 打开」进来的
+  // 文件夹/文件会落到上次留下的那个标签上，看起来就像它被换掉了。
+  if (settings.restoreTabs) restoreCtxs();
   // 从别的窗口拖出来的：Rust 那边存了一份"该打开什么"，取一次就够
   if (!IS_MAIN) {
     const raw = await invoke<string | null>("window_payload", { id: WIN }).catch(() => null);
@@ -4034,16 +4164,12 @@ async function boot() {
   void loadShells();
   if (terms.count() === 0) void terms.newPage(true);
 
-  // 资源管理器右键菜单「用 NifeCode 打开」：文件夹当工作区，文件直接打开（没工作区就拿它所在目录当）
+  // 资源管理器右键菜单「用 NifeCode 打开」：文件夹开成一个（新的）标签，
+  // 文件开在它所属的那个标签里（哪个都不属于就先给它所在目录开一个标签）
   void (async () => {
     const t = await invoke<{ path: string; is_dir: boolean } | null>("startup_target").catch(() => null);
     if (!t) return;
-    if (t.is_dir) await openRoot(t.path);
-    else {
-      // 从资源管理器点的是个文件：把它所在目录当工作区（不然文件树是空/无关的），再打开它
-      await openRoot(parentOf(t.path));
-      await openFile(t.path);
-    }
+    await openFromShell(t.path, { isDir: t.is_dir });
   })();
 
   $<HTMLButtonElement>("#btn-ssh-new").onclick = () => void editProfile();
@@ -4435,21 +4561,23 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
   // 从资源管理器把文件拖进窗口 → 直接打开（不需要先打开工作区；路径是系统给的绝对路径）
   await getCurrentWebview().onDragDropEvent((e) => {
     if (e.payload.type !== "drop") return;
-    // 拖进来的都是本机文件：当前标签连着 SSH 就先切回本机标签，别把本地路径送到远端去读
-    if (host !== null) {
-      const local = contexts.find((c) => c.kind === "local");
-      if (local) switchContext(local.id);
-    }
+    // 拖进来的都是本机文件：当前标签连着 SSH 就先切到本机标签（连一个都没有就开一个），
+    // 否则本地路径会被送到远端去读
+    if (host !== null) localTargetCtx();
     for (const p of e.payload.paths) {
-      if (isWsFile(p)) void openRoot(p); // 拖进来的 .code-workspace 当工作区开，不是当文本看
-      else void openFile(p);
+      if (isWsFile(p)) void openLocalEntryTab(p); // 拖进来的 .code-workspace 当工作区开，不是当文本看
+      else void openLocalFile(p);
     }
   });
 
-  await listen<{ path: string; line?: number }>("bridge:open", (e) => {
+  await listen<{ path: string; line?: number; external?: boolean }>("bridge:open", (e) => {
     // 相对路径按工作区根算，别落到编辑器进程的 cwd 上
     const p = e.payload.path.replace(/\\/g, "/");
-    const abs = /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/");
+    // 资源管理器右键「用 NifeCode 打开」转过来的：按标签的规矩开（该新开就新开，不顶掉现在的标签）
+    if (e.payload.external) return void openFromShell(p, { line: e.payload.line });
+    // 本机盘符 / UNC 路径远端的机器上不存在：站在 SSH 标签上时先站回它所属的那个本机标签
+    if (/^[A-Za-z]:\//.test(p) || p.startsWith("//")) return void openLocalFile(p, e.payload.line, false);
+    const abs = p.startsWith("/");
     // focus = false：agent 改完文件调 /open 是"给你看"，不能把焦点从你手上抢走
     void openFile((abs || !root ? p : joinPath(root, p)).replace(/\\/g, "/"), e.payload.line, false);
   });
@@ -4475,11 +4603,8 @@ ${fwds.map((f) => `127.0.0.1:${f.local} → ${f.remote}`).join(" | ")}`, [
     await invoke("bridge_save_result", { res: { ok: errors.length === 0, saved, errors } }).catch(() => {});
   });
   await listen<{ path: string }>("bridge:workspace", (e) => {
-    // 切工作区是本机动作：当前看的是 SSH 标签时先回本机，否则本机路径会被写进那个 SSH 项目
-    const local = contexts.find((c) => c.kind === "local") ?? contexts[0];
-    if (local.id !== activeId) switchContext(local.id);
-    setConnLabel();
-    void openRoot(e.payload.path);
+    // 切工作区是本机动作：新开（或复用）一个本机标签，不把当前标签换掉；SSH 标签更是碰不得
+    void openLocalEntryTab(e.payload.path);
   });
   await listen<{ path: string; oldContent?: string; newContent: string }>("bridge:diff", async (e) => {
     setMsg(`Agent 提案：${baseName(e.payload.path)}`);

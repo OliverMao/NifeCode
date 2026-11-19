@@ -103,10 +103,15 @@ pub fn forward_to_running(path: &str) -> bool {
     {
         return false;
     }
-    // 文件夹当工作区、文件直接打开，正好对上 bridge 已有的两个接口
+    // 文件夹当工作区（开成一个新标签）、文件直接打开，正好对上 bridge 已有的两个接口
     let is_dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
     let route = if is_dir { "/workspace" } else { "/open" };
-    let body = serde_json::json!({ "path": path }).to_string();
+    // external：告诉前端这是"从外面打开"，文件要开在它所属的标签里（不另开/不顶掉当前标签）
+    let body = if is_dir {
+        serde_json::json!({ "path": path }).to_string()
+    } else {
+        serde_json::json!({ "path": path, "external": true }).to_string()
+    };
     let req = format!(
         "POST {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
